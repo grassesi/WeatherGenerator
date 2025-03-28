@@ -88,9 +88,9 @@ class Trainer(Trainer_Base):
             path_run.mkdir(exist_ok=True)
             path_model.mkdir(exist_ok=True)
             # save config
-            cf.save()
+            config.save(cf)
             if run_mode == "training":
-                cf.print()
+                config.print_cf(cf)
         self.path_run = path_run
 
         self.init_perf_monitoring()
@@ -427,7 +427,7 @@ class Trainer(Trainer_Base):
             torch._dynamo.config.optimize_ddp = False
 
         if self.cf.rank == 0:
-            self.cf.print()
+            config.print_cf(self.cf)
 
         # training loop
 
@@ -827,7 +827,7 @@ class Trainer(Trainer_Base):
             file_tmp.replace(file_out)
 
             # save config
-            self.cf.save(epoch)
+            config.save(self.cf, epoch)
 
     ###########################################
     def log(self, bidx, epoch):
