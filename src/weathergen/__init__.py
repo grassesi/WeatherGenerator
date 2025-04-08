@@ -113,7 +113,7 @@ def evaluate():
     cf.loader_num_workers = min(cf.loader_num_workers, args.samples)
 
     trainer = Trainer()
-    trainer.evaluate(cf, args.run_id, args.epoch)
+    trainer.evaluate(cf, args.epoch)
 
 
 ####################################################################################################
@@ -197,7 +197,7 @@ def train_continue() -> None:
         cf.istep = 0
 
     trainer = Trainer()
-    trainer.run(cf, args.run_id, args.epoch, args.run_id_new)
+    trainer.run(cf, args.epoch, args.run_id_new)
 
 
 ####################################################################################################
