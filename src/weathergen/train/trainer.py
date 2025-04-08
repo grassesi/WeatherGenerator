@@ -48,7 +48,6 @@ class Trainer(Trainer_Base):
         self,
         cf,
         run_id_contd=None,
-        epoch_contd=None,
         run_id_new=False,
         run_mode="training",
     ):
@@ -92,9 +91,10 @@ class Trainer(Trainer_Base):
         self.train_logger = TrainLogger(cf, self.path_run)
 
     ###########################################
-    def evaluate(self, cf, run_id_trained, epoch, run_id_new=False):
+    def evaluate(self, cf, run_id_trained, epoch):
         # general initalization
-        self.init(cf, run_id_trained, epoch, run_id_new, run_mode="evaluate")
+        run_id_trained = config.get_previous_id(cf)
+        self.init(cf, run_id_trained, True, run_mode="evaluate")
 
         self.dataset_val = MultiStreamDataSampler(
             cf,
@@ -278,7 +278,7 @@ class Trainer(Trainer_Base):
     ###########################################
     def run(self, cf, run_id_contd=None, epoch_contd=None, run_id_new=False):
         # general initalization
-        self.init(cf, run_id_contd, epoch_contd, run_id_new)
+        self.init(cf, run_id_contd, run_id_new)
 
         self.dataset = MultiStreamDataSampler(
             cf, cf.start_date, cf.end_date, cf.batch_size, cf.samples_per_epoch, shuffle=True
