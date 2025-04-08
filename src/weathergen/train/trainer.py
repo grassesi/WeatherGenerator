@@ -277,6 +277,9 @@ class Trainer(Trainer_Base):
 
     ###########################################
     def run(self, cf, run_id_contd=None, epoch_contd=None, run_id_new=False):
+        if run_id_new:
+            run_id_contd = config.get_previous_id(cf)
+
         # general initalization
         self.init(cf, run_id_contd, run_id_new)
 

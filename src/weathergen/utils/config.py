@@ -166,3 +166,11 @@ def load_streams(streams_directory: Path) -> list[Config]:
 
     # return OmegaConf.create({"streams": streams})
     return streams
+
+def get_previous_id(cf: Config) -> str:
+    """Extract run_id from last entry in cf.run_history."""
+    try:
+        return cf.run_history[-1][0]
+    except IndexError as e:
+        msg = "Current config has no recorded run history to infer previous run_id."
+        raise RuntimeError(msg) from e
