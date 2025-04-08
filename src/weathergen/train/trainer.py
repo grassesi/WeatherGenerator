@@ -53,14 +53,7 @@ class Trainer(Trainer_Base):
     ):
         self.cf = cf
 
-        if isinstance(run_id_new, str):
-            cf.run_id = run_id_new
-        elif run_id_new or cf.run_id is None:
-            cf.run_id = get_run_id()
-        elif run_id_contd is not None and not run_id_new:
-            cf.run_id = run_id_contd
         assert cf.run_id is not None
-
         assert cf.samples_per_epoch % cf.batch_size == 0
         assert cf.samples_per_validation % cf.batch_size_validation == 0
 
@@ -68,13 +61,6 @@ class Trainer(Trainer_Base):
 
         self.init_ddp(cf)
 
-        # read configuration of data streams
-        # FIXME should concat streams together really
-        cf.streams = config.load_streams(Path(cf.streams_directory))
-
-        # create output directory
-        cf.run_path = cf.run_path if hasattr(cf, "run_path") else "./results"
-        cf.model_path = cf.model_path if hasattr(cf, "model_path") else "./models"
         path_run = Path(cf.run_path) / cf.run_id
         path_model = Path(cf.model_path) / cf.run_id
         if self.cf.rank == 0:

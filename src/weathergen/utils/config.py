@@ -83,6 +83,7 @@ def load_config(
     private_home: Path | None = None,
     run_id: str | None = None,
     epoch: int | None = None,
+    run_id_new: bool = False,
     overwrite_path: Path | None = None,
 ) -> Config:
     private_config = load_private_conf(private_home)
@@ -90,12 +91,22 @@ def load_config(
 
     if run_id is None:
         base_config = load_default_conf()
-        base_config.run_id = get_run_id()
+        run_id_new = True
     else:
         base_config = load_model_config(run_id, epoch, private_config["model_path"])
+    
+    if run_id_new:
+        base_config.run_id = get_run_id()
+
+    base_config.streams = load_streams(Path(base_config.streams_directory))
 
     # use OmegaConf.unsafe_merge if too slow
-    return OmegaConf.merge(base_config, private_config, overwrite_config)
+    config = OmegaConf.merge(base_config, private_config, overwrite_config)
+
+    config.run_path = config.run_path if hasattr(config, "run_path") else "./results"
+    config.model_path = config.model_path if hasattr(config, "model_path") else "./models"
+
+    return config
 
 
 def load_overwrite_conf(overwrite_path: Path | None = None) -> Config:
