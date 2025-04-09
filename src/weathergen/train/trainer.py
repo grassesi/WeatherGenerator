@@ -47,8 +47,6 @@ class Trainer(Trainer_Base):
     def init(
         self,
         cf,
-        run_id_contd=None,
-        run_id_new=False,
         run_mode="training",
     ):
         self.cf = cf
@@ -80,7 +78,7 @@ class Trainer(Trainer_Base):
     def evaluate(self, cf, epoch):
         # general initalization
         run_id_trained = config.get_previous_id(cf)
-        self.init(cf, run_id_trained, True, run_mode="evaluate")
+        self.init(cf, run_mode="evaluate")
 
         self.dataset_val = MultiStreamDataSampler(
             cf,
@@ -267,7 +265,7 @@ class Trainer(Trainer_Base):
             run_id_contd = config.get_previous_id(cf)
 
         # general initalization
-        self.init(cf, run_id_contd, run_id_new)
+        self.init(cf)
 
         self.dataset = MultiStreamDataSampler(
             cf, cf.start_date, cf.end_date, cf.batch_size, cf.samples_per_epoch, shuffle=True
