@@ -91,8 +91,6 @@ def evaluate():
 
     cf = config.load_config(args.private_config, args.run_id, args.epoch)
 
-    cf.run_history += [(cf.run_id, cf.istep)]
-
     cf.samples_per_validation = args.samples
     cf.log_validation = args.samples if args.save_samples else 0
 
@@ -160,9 +158,6 @@ def train_continue() -> None:
     if args.epoch == -2:
         args.epoch = None
     cf = config.load_config(args.private_config, args.run_id, args.epoch)
-
-    # track history of run to ensure traceability of results
-    cf.run_history += [(cf.run_id, cf.istep)]
 
     #########################
     if args.finetune_forecast:

@@ -94,7 +94,9 @@ def load_config(
         run_id_new = True
     else:
         base_config = load_model_config(run_id, epoch, private_config["model_path"])
-    
+        # track history of run to ensure traceability of results
+        base_config.run_history += [(base_config.run_id, base_config.istep)]
+
     if run_id_new:
         base_config.run_id = get_run_id()
 
