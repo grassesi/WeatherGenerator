@@ -27,8 +27,9 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadLocal,
     MultiSelfAttentionHeadVarlen,
 )
+from weathergen.model.forcing import ForcedModel
 from weathergen.model.layers import MLP
-from weathergen.model.model import Model, ModelParams
+from weathergen.model.model import ModelParams
 from weathergen.model.utils import apply_fct_to_blocks, freeze_weights
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype
@@ -106,6 +107,10 @@ def init_model_and_shard(
                 fully_shard(module, **fsdp_kwargs)
 
         for module in model.forecast_engine.fe_blocks.modules():
+            if isinstance(module, modules_to_shard):
+                fully_shard(module, **fsdp_kwargs)
+
+        for module in model.forcing_engine.blocks.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
 
@@ -266,6 +271,6 @@ def get_model(cf: Config, training_mode: TrainingMode, dataset, overrides):
     targets_coords_size = dataset.get_targets_coords_size()
 
     cf_with_overrides = merge_configs(cf, overrides)
-    return Model(
+    return ForcedModel(
         cf_with_overrides, sources_size, targets_num_channels, targets_coords_size
     ).create()
