@@ -6,10 +6,10 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
-from weathergen.common.data import TimeWindowHandler
+#from weathergen.common.data import TimeWindowHandler
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.batch import BatchSamples, SampleMetaData
-from weathergen.datasets.data_reader_base import DataReaderBase, DTRange
+from weathergen.datasets.data_reader_base import DataReaderBase, DTRange, TimeWindowHandler
 from weathergen.datasets.masking import MaskData
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
@@ -17,7 +17,7 @@ from weathergen.datasets.utils import get_tokens_lens
 from weathergen.model.attention import MultiCrossAttentionHeadVarlen
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelOutput, ModelParams
-from weathergen.train.utils import get_dtype
+from weathergen.utils.utils import get_dtype
 
 
 class ForcedModel(Model):
@@ -49,8 +49,8 @@ class ForcedModel(Model):
         ]
 
         _example_sample_data = source_samples.samples[0].streams_data
-        _example_stream = next(_example_sample_data.keys())
-        source_sampling_idx = _example_sample_data[_example_stream].idx
+        _example_stream = list(_example_sample_data.keys())[0]
+        source_sampling_idx = 0 #_example_sample_data[_example_stream].idx
         # output_idxs start with output_offset
         output_offset = source_samples.get_output_idxs()[0]
 
@@ -127,6 +127,10 @@ class ForcingInput:
 
             forcing_samples.samples[sample].add_stream_data(stream.name, sdata)
             forcing_samples.samples[sample].add_meta_info(stream.name, meta_info)
+
+        print("self.forcing_streams:", self.forcing_streams)
+        print("forcing_samples:", forcing_samples)
+        print("self.forcing_window_len:", self.forcing_window_len)
 
         forcing_samples.tokens_lens = get_tokens_lens(
             self.forcing_streams, forcing_samples, self.forcing_window_len
