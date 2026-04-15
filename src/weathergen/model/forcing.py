@@ -6,7 +6,6 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
-#from weathergen.common.data import TimeWindowHandler
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.batch import BatchSamples, SampleMetaData
 from weathergen.datasets.data_reader_base import DataReaderBase, DTRange, TimeWindowHandler
@@ -24,7 +23,7 @@ class ForcedModel(Model):
     def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size):
         super().__init__(cf, sources_size, targets_num_channels, targets_coords_size)
 
-        self.forcing_engine = ForcingEngine(self.cf, self.num_healpix_cells)
+        self.forcing_engine = ForcingEngine(self.cf, self.cf.get("fe_num_blocks", 1))
 
     def forward(
         self,
@@ -47,10 +46,18 @@ class ForcedModel(Model):
             {stream: meta_info.mask for stream, meta_info in sample.meta_info.items()}
             for sample in source_samples.samples
         ]
-
-        _example_sample_data = source_samples.samples[0].streams_data
-        _example_stream = list(_example_sample_data.keys())[0]
-        source_sampling_idx = 0 #_example_sample_data[_example_stream].idx
+        source_sampling_idxs = []
+        for sample in source_samples.samples:
+            sample_idxs = {
+                stream_data.sample_idx
+                for stream_data in sample.streams_data.values()
+                if stream_data is not None
+            }
+            assert len(sample_idxs) == 1, (
+                "Expected exactly one sampling index per sample, "
+                f"got {sorted(sample_idxs)}."
+            )
+            source_sampling_idxs.append(next(iter(sample_idxs)))
         # output_idxs start with output_offset
         output_offset = source_samples.get_output_idxs()[0]
 
@@ -64,11 +71,16 @@ class ForcedModel(Model):
 
         # roll-out in latent space, iterate and generate output over requested output steps
         for step in source_samples.get_output_idxs():
-            if self.forcing_engine:
+            forcing_idx = step - output_offset
+
+            if self.forcing_engine and dynamic_forcings.forcing_streams:
                 # reembedd forcings
-                forcing_idx = source_sampling_idx + step - output_offset
-                forcings = dynamic_forcings.get_data(source_sampling_idx, source_masks)
-                forcing_tokens = self.encoder(model_params, forcings)
+                forcing_sampling_idxs = [
+                    sample_idx + forcing_idx for sample_idx in source_sampling_idxs
+                ]
+                forcings = dynamic_forcings.get_data(forcing_sampling_idxs, source_masks)
+                forcings = forcings.to_device(tokens.device)
+                forcing_tokens, _ = self.encoder(model_params, forcings)
 
                 # combine forcings with current latent space
                 tokens = self.forcing_engine(tokens, forcing_tokens)
@@ -89,7 +101,7 @@ class ForcingInput:
     def __init__(
         self,
         time_window_handler: TimeWindowHandler,
-        forcing_streams: dict[str, DataReaderBase],
+        forcing_streams: dict[str, list[DataReaderBase]],
         tokenizer: TokenizerMasking,
     ):
         self.forcing_window_len = 1
@@ -97,43 +109,47 @@ class ForcingInput:
         self.healpix_lvl = 5  # TODO infer from MSDS
         self.num_healpix_cells = 12 * 4**self.healpix_lvl
 
-        self.time_widow_handler = time_window_handler
+        self.time_window_handler = time_window_handler
         self.tokenizer = tokenizer
         self.tokenize_spacetime = True  # TODO hardcoded, do properly
 
-    def get_data(
-        self, sampling_idx: int, meta_infos: list[dict[str, SampleMetaData]]
-    ) -> BatchSamples:
+    def get_data(self, sampling_idxs: list[int], meta_infos: list[dict[str, torch.Tensor]]) -> BatchSamples:
         """
-        Sample all data sources for the input window corresponding to a given output step.
+        Sample all forcing sources for the input window corresponding to a rollout step.
 
         Args:
-          step: Output step to retrieve forcing sources for.
+          sampling_idxs: Dataset indices to retrieve forcing sources for, one per batch sample.
 
         Returns: Data that can be ingested by the Encoder.
         """
 
         samples = range(len(meta_infos))
+        assert len(sampling_idxs) == len(meta_infos), (
+            "Expected one forcing sampling index per sample, "
+            f"got {len(sampling_idxs)} indices for {len(meta_infos)} samples."
+        )
+
+        forcing_stream_infos = [
+            readers[0].stream_info for readers in self.forcing_streams.values()
+        ]
         forcing_samples = BatchSamples(
-            streams=[readers[0].stream_info for readers in self.forcing_streams],
+            streams=forcing_stream_infos,
             num_samples=len(samples),
             output_steps=1,
             output_idxs=None,  # not needed, since not used in encoder
         )
 
-        for stream, sample in it.product(self.forcing_streams, samples):
-            meta_info = meta_infos[sample][stream]
-            sdata = self._build_stream_data(sampling_idx, stream, meta_info.mask)
+        for stream, sample in it.product(self.forcing_streams.keys(), samples):
+            mask = meta_infos[sample][stream]
+            meta_info = SampleMetaData(params={}, mask=mask)
 
-            forcing_samples.samples[sample].add_stream_data(stream.name, sdata)
-            forcing_samples.samples[sample].add_meta_info(stream.name, meta_info)
+            sdata = self._build_stream_data(sampling_idxs[sample], stream, mask)
 
-        print("self.forcing_streams:", self.forcing_streams)
-        print("forcing_samples:", forcing_samples)
-        print("self.forcing_window_len:", self.forcing_window_len)
+            forcing_samples.samples[sample].add_stream_data(stream, sdata)
+            forcing_samples.samples[sample].add_meta_info(stream, meta_info)
 
         forcing_samples.tokens_lens = get_tokens_lens(
-            self.forcing_streams, forcing_samples, self.forcing_window_len
+            forcing_stream_infos, forcing_samples, self.forcing_window_len
         )
 
         return forcing_samples
@@ -168,7 +184,7 @@ class ForcingInput:
             )[0]
 
             # TODO is this the intended behaviour => all(rdatas.is spoof)
-            stream_data.source_is_spoof = rdata.is_spoof
+            stream_data.source_is_spoof[step] = rdata.is_spoof
 
             # preprocess data for model input
             (source_cells, source_cells_lens) = self.tokenizer.get_source(
@@ -227,7 +243,7 @@ class ForcingEngine(torch.nn.Module):
                 dim_embed_q=self.cf.ae_global_dim_embed,
                 dim_embed_kv=self.cf.ae_global_dim_embed,
                 num_heads=self.cf.fe_num_heads,
-                dim_head_proj=self.cf.ae_global_dim_embed,  # TODO check what this is
+                dim_head_proj=None,
                 dropout_rate=self.cf.ae_adapter_dropout_rate,
                 with_residual=True,
                 with_qk_lnorm=True,  # TODO check what this is
@@ -249,7 +265,54 @@ class ForcingEngine(torch.nn.Module):
         self.blocks = torch.nn.ModuleList(block * n_blocks)
 
     def forward(self, latent_tokens, forcing_tokens):
-        for block in self.blocks:
-            latent_tokens = checkpoint(block, latent_tokens, forcing_tokens)
+        # MultiCrossAttentionHeadVarlen expects flattened varlen tokens + lens vectors.
+        # Here we adapt from batched [B, T, D] tensors and restore shape afterwards.
+        assert latent_tokens.ndim == 3, f"Expected latent_tokens to be [B,T,D], got {latent_tokens.shape}"
+        assert forcing_tokens.ndim == 3, (
+            f"Expected forcing_tokens to be [B,T,D], got {forcing_tokens.shape}"
+        )
 
-        return latent_tokens
+        batch_size, latent_len, dim_embed = latent_tokens.shape
+        forcing_batch = forcing_tokens.shape[0]
+        forcing_len = forcing_tokens.shape[1]
+
+        if forcing_batch != batch_size:
+            assert forcing_batch % batch_size == 0, (
+                f"Incompatible batch sizes for forcing attention: latent B={batch_size}, "
+                f"forcing B={forcing_batch}"
+            )
+            num_steps = forcing_batch // batch_size
+            forcing_tokens = forcing_tokens.reshape(
+                batch_size, num_steps, forcing_len, forcing_tokens.shape[-1]
+            ).sum(dim=1)
+            forcing_len = forcing_tokens.shape[1]
+
+        latent_tokens_flat = latent_tokens.reshape(batch_size * latent_len, dim_embed)
+        forcing_tokens_flat = forcing_tokens.reshape(batch_size * forcing_len, forcing_tokens.shape[-1])
+
+        latent_lens = torch.full(
+            (batch_size + 1,), fill_value=latent_len, dtype=torch.int32, device=latent_tokens.device
+        )
+        forcing_lens = torch.full(
+            (batch_size + 1,),
+            fill_value=forcing_len,
+            dtype=torch.int32,
+            device=latent_tokens.device,
+        )
+        latent_lens[0] = 0
+        forcing_lens[0] = 0
+
+        for block in self.blocks:
+            if isinstance(block, MultiCrossAttentionHeadVarlen):
+                latent_tokens_flat = checkpoint(
+                    block,
+                    latent_tokens_flat,
+                    forcing_tokens_flat,
+                    latent_lens,
+                    forcing_lens,
+                    use_reentrant=False,
+                )
+            else:
+                latent_tokens_flat = checkpoint(block, latent_tokens_flat, use_reentrant=False)
+
+        return latent_tokens_flat.reshape(batch_size, latent_len, dim_embed)
