@@ -1,0 +1,7 @@
+test_config:
+  start_date: 2023-06-01T00:00
+  end_date: 2023-12-31T00:00
+
+  samples_per_mini_epoch: 120 # one month
+  output : {num_samples: 120}
+  forecast: {num_steps: 120} # one month 360~three months
