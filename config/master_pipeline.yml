@@ -1,0 +1,92 @@
+parallelize: True
+stages:
+ - name: base-6hx1 # failed inexplicabaly
+   stage: train
+   base_config: config/master_ocean.yml
+   chain_jobs: 3
+   options:
+    - "wgtags.exp='base-6hx1'"
+ - name: ft-base-6hx1
+   stage: train
+   from_run_id: STAGE.base-6hx1
+   chain_jobs: 2
+   config_files:
+    - config/config_forecasting_finetuning.yml
+   options:
+    - "wgtags.exp='ft-base-6hx1'"
+ - name: infer-base-6hx1
+   stage: inference
+   from_run_id: STAGE.ft-base-6hx1
+   slurm_args: ["--time=04:00:00"]
+   options:
+     - "wgtags.exp='inference-base-6hx1'"
+     - "data_loading.num_workers=18" # double for more speed?
+
+ - name: small-6hx1
+   stage: train
+   base_config: config/master_ocean.yml
+   chain_jobs: 2
+   config_files:
+    - config/small_overwrite.yml
+   options:
+    - "wgtags.exp=small-6hx1"
+ - name: ft-small-6hx1
+   stage: train
+   from_run_id: STAGE.small-6hx1
+   config_files:
+    - config/config_forecasting_finetuning.yml
+   options:
+    - "wgtags.exp='ft-small-6hx1'"
+ - name: infer-small-6hx1
+   stage: inference
+   from_run_id: STAGE.ft-small-6hx1
+   slurm_args: ["--time=04:00:00"]
+   options:
+     - "wgtags.exp='inference-small-6hx1'"
+     - "data_loading.num_workers=18" # double for more speed?
+
+ - name: small-tiny-6hx1 # failed inexplicabaly
+   stage: train
+   base_config: config/master_ocean.yml
+   chain_jobs: 2
+   config_files:
+    - config/small_tiny_overwrite.yml
+   options:
+    - "wgtags.exp='small-tiny-6hx1'"
+ - name: ft-small-tiny-6hx1
+   stage: train
+   from_run_id: STAGE.small-tiny-6hx1
+   config_files:
+    - config/config_forecasting_finetuning.yml
+   options:
+    - "wgtags.exp='ft-small-tiny-6hx1'"
+ - name: infer-small-tiny-6hx1
+   stage: inference
+   from_run_id: STAGE.ft-small-tiny-6hx1
+   slurm_args: ["--time=04:00:00"]
+   options:
+     - "wgtags.exp='inference-small-tiny-6hx1'"
+     - "data_loading.num_workers=18" # double for more speed?
+
+ - name: tiny-6hx1
+   stage: train
+   base_config: config/master_ocean.yml
+   chain_jobs: 2
+   config_files:
+    - config/tiny_overwrite.yml
+   options:
+    - "wgtags.exp='tiny-6hx1'"
+ - name: ft-tiny-6hx1
+   stage: train
+   from_run_id: STAGE.tiny-6hx1
+   config_files:
+    - config/config_forecasting_finetuning.yml
+   options:
+    - "wgtags.exp='ft-tiny-6hx1'"
+ - name: infer-tiny-6hx1
+   stage: inference
+   from_run_id: STAGE.ft-tiny-6hx1
+   slurm_args: ["--time=04:00:00"]
+   options:
+     - "wgtags.exp='inference-tiny-6hx1'"
+     - "data_loading.num_workers=18" # double for more speed?

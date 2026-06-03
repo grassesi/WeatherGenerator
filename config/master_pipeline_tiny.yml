@@ -1,0 +1,23 @@
+stages:
+ - name: tiny-24hx1
+   stage: train
+   base_config: config/master_ocean.yml
+   chain_jobs: 2
+   config_files:
+    - config/tiny_overwrite.yml
+   options:
+    - "wgtags.exp='tiny-24hx1'"
+ - name: ft-tiny-24hx1
+   stage: train
+   from_run_id: STAGE.tiny-24hx1
+   config_files:
+    - config/config_forecasting_finetuning.yml
+   options:
+    - "wgtags.exp='ft-tiny-24hx1'"
+ - name: infer-tiny-24hx1
+   stage: inference
+   from_run_id: STAGE.ft-tiny-24hx1
+   slurm_args: ["--time=04:00:00"]
+   options:
+     - "wgtags.exp='inference-tiny-24hx1'"
+     - "data_loading.num_workers=18" # double for more speed?

@@ -144,8 +144,8 @@ training_config:
   start_date: 1979-01-01T00:00
   end_date: 2021-12-31T00:00
 
-  time_window_step: 06:00:00
-  time_window_len: 06:00:00
+  time_window_step: 24:00:00
+  time_window_len: 24:00:00
   
   learning_rate_scheduling :
     lr_start: 1e-6
@@ -184,7 +184,7 @@ training_config:
     }
 
   forecast :
-      time_step: 06:00:00
+      time_step: 24:00:00
       offset: 1
       num_steps: 3
       policy: "fixed"
@@ -219,12 +219,15 @@ validation_config:
   validate_before_training: False
 
 test_config:
-  start_date: 2023-06-01T00:00
+  start_date: 2023-01-01T00:00
   end_date: 2023-12-31T00:00
 
-  samples_per_mini_epoch: 120 # one month
-  output : {num_samples: 120}
-  forecast: {num_steps: 360} # thre months
+  samples_per_mini_epoch: 1 # one month
+  init_freq: "quarterly"
+  output :
+    num_samples: 1
+    streams: ["ERA5-Ocean"]
+  forecast: {num_steps: 1453} # three months
 # test config; full test config is merge of validation and test config
 # test config is used by default when running inference
 
@@ -238,5 +241,5 @@ test_config:
 wgtags:
   org: JSC
   issue: null
-  exp: baseline
-  grid: ocean-master-1
+  exp: null
+  grid: ocean-master-s2s-target
