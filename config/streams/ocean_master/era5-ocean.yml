@@ -9,10 +9,10 @@
 
 ERA5-Ocean :
   type : anemoi
-  filenames : ['ERA5-1deg-6h-mean-forcing-1978-2024.zarr']
+  filenames : ['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v2-s2s-predictors.zarr']
   stream_id : 0
   source : []
-  target : ["sea_surface_temperature"]
+  target : ["sst"]
   is_dynamic_forcing: True
   loss_weight : 1.
   location_weight : cosine_latitude
