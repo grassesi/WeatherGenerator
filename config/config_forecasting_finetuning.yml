@@ -52,7 +52,7 @@ training_config:
     parallel_scaling_policy: "sqrt"
 
   forecast :
-      time_step: 06:00:00
+      time_step: 24:00:00 # changed from 06:00:00
       offset: 1
       num_steps: 8
       policy: "fixed"
