@@ -145,8 +145,8 @@ training_config:
   start_date: 1979-01-01T00:00
   end_date: 2021-12-31T00:00
 
-  time_window_step: 24:00:00
-  time_window_len: 24:00:00
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
   
   learning_rate_scheduling :
     lr_start: 1e-6
@@ -185,7 +185,7 @@ training_config:
     }
 
   forecast :
-      time_step: 24:00:00
+      time_step: 06:00:00
       offset: 1
       num_steps: 3
       policy: "fixed"
@@ -228,7 +228,7 @@ test_config:
   output :
     num_samples: 1
     streams: ["ERA5-Ocean"]
-  forecast: {num_steps: 1453} # three months
+  forecast: {num_steps: 1453} # ~one year
 # test config; full test config is merge of validation and test config
 # test config is used by default when running inference
 
