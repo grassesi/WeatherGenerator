@@ -99,7 +99,7 @@ def _sanitize_start_end_time_keys(sub_conf):
 
 def _sanitize_delta_time_keys(sub_conf):
     """Convert time delta keys to timedelta resolvers."""
-    delta_keys = ["time_window_step", "time_window_len"]
+    delta_keys = ["time_window_step", "time_window_len", "frequency"]
     for key in delta_keys:
         if key in sub_conf:
             sub_conf = _patch_time(key, sub_conf, _TIMEDELTA_TYPE_NAME)
@@ -119,6 +119,9 @@ def _sanitize_time_keys(conf: Config) -> Config:
     """
 
     conf = conf.copy()
+    
+    for stream in conf.streams.values():
+        _sanitize_delta_time_keys(stream)
 
     if conf.get("training_config") is not None:
         _sanitize_delta_time_keys(conf.training_config)
@@ -413,22 +416,8 @@ def load_merge_configs(
     Returns:
         Merged configuration object.
     """
-    private_config = _load_private_conf(private_home)
-    overwrite_configs: list[Config] = []
-    for overwrite in overwrites:
-        if isinstance(overwrite, (str | Path)):
-            # Because of the way we pass extra configs through slurm,
-            # all the paths may be concatenated with ":"
-            p = str(overwrite).split(":")
-            for path in p:
-                c = _load_overwrite_conf(Path(path))
-                c = _load_streams_in_config(c)
-                overwrite_configs.append(c)
-        else:
-            # If it is a dict or DictConfig, we can directly use it
-            c = _load_overwrite_conf(overwrite)
-            c = _load_streams_in_config(c)
-            overwrite_configs.append(c)
+    private_config = _load_private_conf(private_home)    
+    overwrite_configs = _load_overwrites(overwrites)
 
     if from_run_id is None:
         base_config = _load_base_conf(base)
@@ -437,23 +426,60 @@ def load_merge_configs(
         from_run_id = get_run_id_from_config(base_config)
     with open_dict(base_config):
         base_config.from_run_id = from_run_id
+
     # use OmegaConf.unsafe_merge if too slow
     c = OmegaConf.merge(base_config, private_config, *overwrite_configs)
+    c.streams = _resolve_streams(base_config, overwrite_configs)
     assert isinstance(c, Config)
     c = _sanitize_time_keys(c)
 
     return c
 
+def _resolve_streams(base_conf: Config, overwrites: list[Config]) -> Config:
+    """Resolve streams properly: """
+    streams_directory = base_conf.streams_directory
+    for overwrite in overwrites:
+        streams_directory = overwrite.get("streams_directory", streams_directory)
 
-def _load_streams_in_config(config: Config) -> Config:
-    """If the config contains a streams_directory, loads the streams and returns the config with
-    the streams set."""
-    streams_directory = config.get("streams_directory", None)
-    config = config.copy()
-    if streams_directory is not None:
-        streams_directory = Path(streams_directory)
-        config.streams = load_streams(streams_directory)
-    return config
+    is_streams_unintialized = "streams" in OmegaConf.missing_keys(base_conf) or not base_conf.get("streams")
+    is_stream_dir_changed = base_conf.streams_directory != streams_directory
+    if is_streams_unintialized or is_stream_dir_changed:
+        logging.info(f"Loading streams from streams directory: {streams_directory}.")
+        streams = load_streams(Path(streams_directory))
+    else:
+        logging.info(f"Stream confs exist and streams directory has not changed: No need to reload streams from directory.")
+        streams = base_conf.streams
+    
+    for overwrite in overwrites:
+        overwrite_streams = overwrite.get("streams", {})
+        for stream_name, stream_conf in overwrite_streams.items():
+            # only overwrite existing streams, to get valid/complete stream configs
+            try:
+                streams[stream_name] = OmegaConf.merge(streams[stream_name], stream_conf)
+            except KeyError as e:
+                logging.warning(f"Trying to overwrite non existing stream: {stream_name}, make sure the correct streams directory is used.)")
+
+    return streams
+
+
+def _load_overwrites(overwrites: list[Path | dict | Config]) -> list[Config]:
+    logging.info(overwrites)
+    overwrite_configs: list[Config] = []
+    for overwrite in overwrites:
+        if isinstance(overwrite, (str | Path)):
+            # Because of the way we pass extra configs through slurm,
+            # all the paths may be concatenated with ":"
+            paths = [Path(path) for path in str(overwrite).split(":")]
+        else:
+            # If it is a dict or DictConfig, we can directly use it
+            paths = [overwrite]
+
+        for path in paths:
+            c = _load_overwrite_conf(path)
+            assert isinstance(c, DictConfig)
+            overwrite_configs.append(c)
+    
+    return overwrite_configs
 
 
 def set_run_id(config: Config, run_id: str | None, reuse_run_id: bool) -> Config:
@@ -669,10 +695,6 @@ def load_streams(streams_directory: Path) -> Config:
             # support commenting out entire stream files to avoid loading them.
             _logger.warning(f"Parsed stream configuration file is empty: {config_file}")
             continue
-
-    for _, stream in streams.items():
-        if stream.get("frequency", None) is not None:
-            stream = _patch_time("frequency", stream, _TIMEDELTA_TYPE_NAME)
 
     return OmegaConf.create(streams)
 
