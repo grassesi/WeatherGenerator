@@ -24,9 +24,9 @@ stages:
    chain_jobs: 2
    config_files:
     - config/tiny_overwrite.yml
-    - config/radiation_stream_overwrite.yml
     - config/large_dt_overwrite.yml
    options:
+    - "streams_directory='./config/streams/ocean_master_rad/'"
     - "wgtags.exp='tiny-24hx1-rad-freq'"
  - name: ft-tiny-24hx1-rad
    stage: train
