@@ -1,0 +1,35 @@
+stages:
+ - name: monolithic-baseline-sst
+   stage: train
+   base_config: config/config_forecasting.yml
+   config_files:
+   - config/monolithic_overwrite.yml
+   - config/multi_stream_overwrite.yml
+   chain_jobs: 3
+   options:
+    - "streams_directory='./config/streams/ocean_master'"
+    - "wgtags.exp='monolitic-baseline-sst'"
+#  - name: ft-monolithic-baseline-sst
+#    stage: train
+#    from_run_id: STAGE.monolithic-baseline-sst
+#    config_files:
+#     - config/config_forecasting_finetuning.yml
+#    options:
+#     - "wgtags.exp='ft-monolitic-baseline-sst'"
+ - name: monolithic-baseline-sst-rad
+   stage: train
+   base_config: config/config_forecasting.yml
+   config_files:
+   - config/monolithic_overwrite.yml
+   - config/multi_stream_overwrite.yml
+   chain_jobs: 3
+   options:
+    - "streams_directory='./config/streams/ocean_master_rad'"
+    - "wgtags.exp='monolitic-baseline-sst'"
+#  - name: ft-monolithic-baseline-sst-rad
+#    stage: train
+#    from_run_id: STAGE.monolithic-baseline-sst-rad
+#    config_files:
+#     - config/config_forecasting_finetuning.yml
+#    options:
+#     - "wgtags.exp='ft-monolitic-baseline-sst'"
