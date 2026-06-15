@@ -14,6 +14,7 @@ ERA5 :
   # insolation excluded since computed forcing
   source : ['10u', '10v', 'z_1000', 'insolation']
   target : []
+  geoinfo_channels : ['z', 'lsm', 'slor', 'sdor', 'insolation', 'cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day']
   is_dynamic_forcing: True
   loss_weight : 1.
   location_weight : cosine_latitude
