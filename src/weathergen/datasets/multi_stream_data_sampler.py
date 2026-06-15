@@ -25,6 +25,7 @@ from weathergen.datasets.data_reader_base import (
     TimeWindowHandler,
     TIndex,
 )
+from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
 from weathergen.datasets.data_reader_obs import DataReaderObs
 from weathergen.datasets.masking import Masker
@@ -266,6 +267,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                         + f" from stream config {stream_name}.",
                     )
                 ds = dataset(filename=filename, **kwargs)
+                if stream_info.get("average_window", False):
+                    ds = AveragingReader(ds)
 
                 streams_datasets[stream_name].readers += [ds]
 
