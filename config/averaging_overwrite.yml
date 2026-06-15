@@ -1,0 +1,4 @@
+streams:
+  ERA5-Ocean: {frequency: '06:00:00', average_window: True}
+  ERA5: {frequency: '06:00:00', average_window: True}
+  ERA5-radiation: {frequency: '06:00:00', average_window: True}
