@@ -25,6 +25,7 @@ import weathergen.common.config as config
 from weathergen.common.config import Config
 from weathergen.datasets.multi_stream_data_sampler import MultiStreamDataSampler
 from weathergen.model.ema import EMAModel
+from weathergen.model.forcing import ForcingInput
 from weathergen.model.model_interface import (
     init_model_and_shard,
 )
@@ -201,6 +202,14 @@ class Trainer(TrainerBase):
             stage=VAL,
         )
         self.dataset_val = self.dataset
+        forcing_streams = {
+            stream: datasets
+            for stream, datasets in self.dataset_val.streams_datasets.items()
+            if datasets[0].stream_info.get("is_dynamic_forcing", False)
+        }
+        self.dynamic_forcings = ForcingInput(
+            self.dataset.time_window_handler, forcing_streams, self.dataset_val.tokenizer
+        )
 
         # make sure number of loaders does not exceed requested samples
         loader_num_workers = min(self.test_cfg.samples_per_mini_epoch, cf.data_loading.num_workers)
@@ -432,6 +441,15 @@ class Trainer(TrainerBase):
 
         self.optimizer.zero_grad()
 
+        forcing_streams = {
+            stream: datasets
+            for stream, datasets in self.dataset.streams_datasets.items()
+            if datasets[0].stream_info.get("is_dynamic_forcing", False)
+        }
+        self.dynamic_forcings = ForcingInput(
+            self.dataset.time_window_handler, forcing_streams, self.dataset.tokenizer
+        )
+
         # training loop
         self.t_start = time.time()
         for bidx, batch in enumerate(dataset_iter):
@@ -447,8 +465,7 @@ class Trainer(TrainerBase):
                 enabled=cf.with_mixed_precision,
             ):
                 preds = self.model(
-                    self.model_params,
-                    batch.get_source_samples(),
+                    self.model_params, batch.get_source_samples(), self.dynamic_forcings
                 )
 
                 targets_and_auxs = {}
@@ -588,8 +605,7 @@ class Trainer(TrainerBase):
                     ):
                         if self.ema_model is None:
                             preds = self.model(
-                                self.model_params,
-                                batch.get_source_samples(),
+                                self.model_params, batch.get_source_samples(), self.dynamic_forcings
                             )
                         else:
                             preds = self.ema_model.forward_eval(

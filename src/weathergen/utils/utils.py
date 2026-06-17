@@ -31,9 +31,14 @@ def get_dtype(value: str) -> torch.dtype:
 
 def is_stream_forcing(stream_cfg: dict, stage: Stage | None = None) -> bool:
     """
-    Determine if stream is forcing, i.e. does not produce (physical) predictions
+    Determine if stream is forcing-only, i.e. does not produce physical predictions.
+
+    Streams marked as `is_dynamic_forcing` are still re-embedded during rollout, but they should
+    continue to produce predictions whenever target channels are present.
     """
-    is_forcing = stream_cfg.get("forcing", False)
+    is_forcing = stream_cfg.get("forcing", False) and not stream_cfg.get(
+        "is_dynamic_forcing", False
+    )
     if stage is not None:
         is_forcing = is_forcing or (
             (len(stream_cfg.get("train_target_channels", [])) == 0)
