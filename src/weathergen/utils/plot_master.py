@@ -19,10 +19,11 @@ RESULTS_DIR = Path("/p/home/jusers/grasse1/juwels/WeatherGenerator/results")
 RUN_ID = "ne7wcujt"
 
 
-def global_temperature_mean(item: OutputItem):
+def global_temperature_mean(item: OutputItem, climatology):
     return {
-        "target": np.nanmean(item.target.data) - KELVIN,
-        "prediction": np.nanmean(item.prediction.data) - KELVIN,
+        "target": np.nanmean(item.target.data),
+        "prediction": np.nanmean(item.prediction.data),
+        "anomaly": np.nanmean(item.prediction.data - climatology)
     }
 
 
@@ -32,13 +33,14 @@ def process_item(work_item: pd.Index, reader: ZarrIO, stream: str, index: dict[s
         work_item.name: work_item.values[0],
         **index,
     }
+
     item = reader.get_data(**kwargs)
     result = pd.DataFrame(
         data={
             "source_interval_start": item.target.source_interval.start,
             "source_interval_end": item.target.source_interval.end,
             "channel": item.target.channels[0],
-            **global_temperature_mean(item),
+            **global_temperature_mean(item, climatology),
             **kwargs
         },
         index=work_item,
@@ -75,7 +77,6 @@ def get_timeseries(result_path: Path, stream: str, fstep=None, sample=None):
         with Pool(NPROCS) as p:
             chunk_size = max(len(work_items) // NPROCS, 1)
             return pd.concat(p.imap(worker_fun, work_items, chunksize=chunk_size))
-
 
 def main():
     start = datetime.now()
