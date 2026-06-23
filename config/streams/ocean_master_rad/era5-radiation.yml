@@ -10,7 +10,7 @@
 ERA5-radiation :
   type : anemoi
   filenames : ['radiaiton_era5_1.25_1979-2022-6h-v1_hydrology.zarr']
-  stream_id : 0
+  stream_id : 2
   # insolation excluded since computed forcing
   source : ['avg_sdlwrf', 'avg_sdswrf']
   target : []
