@@ -34,3 +34,4 @@ class Couplings:
         return cls(components)
     
     def generate_run_configs():
+        pass

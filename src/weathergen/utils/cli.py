@@ -82,12 +82,10 @@ def _add_inference_args(parser: argparse.ArgumentParser):
     coupled_inference = subparsers.add_parser("coupled")
     coupled_inference.add_argument(
         "couplings",
-        required=True,
         help="yaml config file containing couplings."
     )
     coupled_inference.add_argument(
         "components",
-        required=True,
         nargs="+",
         default="[]",
         help="Assign model ideas to coupling components: '<Component>= <run_id>@<mini-epoch>, ...'."
