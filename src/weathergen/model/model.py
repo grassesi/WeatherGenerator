@@ -781,7 +781,7 @@ class Model(torch.nn.Module):
                 for i_b in range(batch_size)
             ]
             t_coords_lens = [len(t) for t in t_coords]
-            t_coords = torch.cat(t_coords)
+            t_coords = torch.cat(t_coords) # first column contains stream_id
 
             if len(t_coords) == 0:
                 continue
