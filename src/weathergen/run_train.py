@@ -20,6 +20,7 @@ import traceback
 from pathlib import Path
 
 import weathergen.common.config as config
+from weathergen.common.coupling import Coupling
 import weathergen.utils.cli as cli
 from weathergen.common.logger import init_loggers
 from weathergen.train.trainer import Trainer
@@ -85,28 +86,33 @@ def run_inference(args):
     Note: Additional configuration for inference (`test_config`) is set in the function.
     """
 
-    cli_overwrite = config.from_cli_arglist(args.options)
-    cf = config.load_merge_configs(
-        args.private_config,
-        args.from_run_id,
-        args.mini_epoch,
-        args.base_config,
-        *args.config,
-        {},
-        cli_overwrite,
-    )
-    cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
+    if args.strategy == "simple":
+        cli_overwrite = config.from_cli_arglist(args.options)
+        cf = config.load_merge_configs(
+            args.private_config,
+            args.from_run_id,
+            args.mini_epoch,
+            args.base_config,
+            *args.config,
+            {},
+            cli_overwrite,
+        )
+        cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
 
-    devices = Trainer.init_torch()
-    cf = Trainer.init_ddp(cf)
+        devices = Trainer.init_torch()
+        cf = Trainer.init_ddp(cf)
 
-    init_loggers(cf.general.run_id)
+        init_loggers(cf.general.run_id)
 
-    logger.info(f"DDP initialization: rank={cf.rank}, world_size={cf.world_size}")
+        logger.info(f"DDP initialization: rank={cf.rank}, world_size={cf.world_size}")
 
-    cf.general.run_history += [(args.from_run_id, cf.general.istep)]
+        cf.general.run_history += [(args.from_run_id, cf.general.istep)]
 
-    trainer = Trainer(cf.train_logging)
+        trainer = Trainer(cf.train_logging)
+    elif args.strategy == "coupled":
+        coupling = Coupling.from_args(args.components)
+        print(coupling)
+        exit()
     try:
         trainer.inference(cf, devices, args.from_run_id, args.mini_epoch)
     except Exception:

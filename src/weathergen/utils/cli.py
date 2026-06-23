@@ -74,7 +74,25 @@ def _add_continue_args(parser: argparse.ArgumentParser):
 
 
 def _add_inference_args(parser: argparse.ArgumentParser):
-    _add_model_loading_params(parser)
+    subparsers = parser.add_subparsers(dest="strategy")
+    
+    simple_inference = subparsers.add_parser("simple")
+    _add_model_loading_params(simple_inference)
+    
+    coupled_inference = subparsers.add_parser("coupled")
+    coupled_inference.add_argument(
+        "couplings",
+        required=True,
+        help="yaml config file containing couplings."
+    )
+    coupled_inference.add_argument(
+        "components",
+        required=True,
+        nargs="+",
+        default="[]",
+        help="Assign model ideas to coupling components: '<Component>= <run_id>@<mini-epoch>, ...'."
+    )
+    
     _add_general_arguments(parser)
 
 
