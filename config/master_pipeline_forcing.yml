@@ -1,0 +1,30 @@
+parallelize: True
+stages:
+# finetuning ocean
+ - name: atmosurface+sst-sst_forcing-ft
+   stage: train
+   from_run_id: ???
+   options:
+    - wgtags.grid=master-coupling-forcing-ft-01
+    - wgtags.exp=atmosurface+sst-sst
+
+ - name: rad+atmosurface+sst-sst-forcing-ft
+   stage: train
+   from_run_id: ???
+   options:
+    - wgtags.grid=master-coupling-forcing-ft-01
+    - wgtags.exp=rad+atmosurface+sst-sst
+# finetuning atmo
+ - name: sst+atmo-atmo_forcing-ft
+   stage: train
+   from_run_id: ???
+   options:
+    - wgtags.grid=master-coupling-forcing-ft-01
+    - wgtags.exp=sst+atmo-atmo_ft
+
+ - name: sst+atmo-atmo+rad_forcing-ft
+   stage: train
+   from_run_id: ???
+   options:
+    - wgtags.grid=master-coupling-forcing-ft-01
+    - wgtags.exp=sst+atmo-atmo+rad_ft

@@ -9,10 +9,10 @@
 
 ERA5:
   type: anemoi
-  filenames: ["aifs-ea-an-1h-0001-mars-o96-o96-2023-6h-v8.zarr"]
+  filenames: ["aifs-ea-an-1h-0001-mars-o96-1979-2023-6h-v8.zarr"]
   stream_id: 0
   # insolation excluded since computed forcing
-  source: ["10u", "10v", "z_1000", "insolation"]
+  source: ["10u", "10v", "z_1000"]
   target: []
   geoinfo_channels:
     [

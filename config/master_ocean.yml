@@ -12,7 +12,7 @@ embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
 
 ae_local_dim_embed: 2048
-ae_local_num_blocks: 0
+ae_local_num_blocks: 2
 ae_local_num_heads: 16
 ae_local_dropout_rate: 0.1
 ae_local_with_qk_lnorm: True
@@ -92,7 +92,7 @@ qk_norm_type: "LayerNorm"
 
 #####################################
 
-streams_directory: "./config/streams/ocean_master/"
+streams_directory: ???
 streams: ???
 
 # type of zarr_store
@@ -173,7 +173,9 @@ training_config:
   losses : {
     "physical": {
         type: LossPhysical,
-        loss_fcts: { "mse": { }, },
+        loss_fcts: {
+          mse: { },
+          dynamic_loss: {window: 100, L: 20.0}
         },
     }
   
@@ -187,7 +189,7 @@ training_config:
   forecast :
       time_step: 06:00:00
       offset: 1
-      num_steps: 3
+      num_steps: 4
       policy: "fixed"
 
 
@@ -224,23 +226,13 @@ test_config:
   end_date: 2023-12-31T00:00
 
   samples_per_mini_epoch: 1 # one month
-  init_freq: "quarterly"
+  init_freq: "half"
   output :
     num_samples: 1
-    streams: ["ERA5-Ocean"]
-  forecast: {num_steps: 1453} # ~one year
-# test config; full test config is merge of validation and test config
-# test config is used by default when running inference
+  forecast: {num_steps: 500} # 125 days j~1/2 year
 
-# Tags for experiment tracking
-# These tags will be logged in MLFlow along with completed runs for train, eval, val
-# The tags are free-form, with the following rules:
-# - tags should be primitive types (strings, numbers, booleans). NO lists or dictionaries
-# - tags should not duplicate existing config entries.
-# - try to reuse existing tags where possible. MLFlow does not like having too many unique tags
-# - do not use long strings in values (less than 20 characters is a good rule of thumb, we may enforce this in the future)
 wgtags:
   org: JSC
   issue: null
   exp: null
-  grid: ocean-master-s2s-target
+  grid: null

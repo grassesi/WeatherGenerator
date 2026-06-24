@@ -1,0 +1,9 @@
+training_config:
+  num_mini_epochs: 2
+  samples_per_mini_epoch: 128
+  learning_rate_scheduling :
+    num_steps_warmup: 8
+    num_steps_cooldown: 16
+
+validation_config: 
+  samples_per_mini_epoch: 32

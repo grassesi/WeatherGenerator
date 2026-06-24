@@ -1,0 +1,22 @@
+healpix_level: 3 # TODO check for smoothing artifacts in sst texture
+
+# TODO change model complexity?!
+# fe_num_blocks: 16
+# ae_local_dim_embed: 2048
+# ae_global_dim_embed: 2048
+
+training_config:
+  time_window_step: '96:00:00'
+  time_window_len: '96:00:00'
+
+  forecast: {time_step: '96:00:00', num_steps: 1}
+
+# TODO adjust validation_config.forecast.num_steps / training_config.forecast.num_step for finetuning (maybe 2/4)?
+
+test_config:
+  forecast: {num_steps: 31} # adjust for bigger timestep
+
+streams:
+  ERA5-Ocean: {frequency: '96:00:00', average_window: True}
+  ERA5: {frequency: '96:00:00', average_window: True}
+  ERA5-radiation: {frequency: '96:00:00', average_window: True}

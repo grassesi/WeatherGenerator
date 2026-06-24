@@ -1,0 +1,61 @@
+parallelize: True
+stages:
+# pretraining
+ - name: atmo-atmo
+   stage: train
+   chain_jobs: 3
+   base_config: config/master_ocean.yml
+   config_files:
+    - config/atmo_overwrite.yml
+   options:
+    - streams_directory=./config/streams/ocean_master_only_era5/
+    - ae_local_num_blocks=0 # disable local assimilation for just ERA5
+    - wgtags.grid=master-coupling-atmo-01
+    - wgtags.exp=atmo-atmo_pre
+
+ - name: sst+atmo-atmo
+   stage: train
+   chain_jobs: 3
+   base_config: config/master_ocean.yml
+   config_files:
+    - config/atmo_overwrite.yml
+   options:
+    - streams_directory=./config/streams/ocean_master/
+    - wgtags.grid=master-coupling-atmo-01
+    - wgtags.exp=sst+atmo-atmo_pre
+
+ - name: sst+atmo-atmo+rad
+   stage: train
+   chain_jobs: 3
+   base_config: config/master_ocean.yml
+   config_files:
+    - config/atmo_overwrite.yml
+   options:
+    - streams_directory=./config/streams/ocean_master_rad/
+    - wgtags.grid=master-coupling-atmo-01
+    - wgtags.exp=sst+atmo-atmo+rad_pre
+
+# finetuning
+ - name: atmo-atmo_ft
+   stage: train
+   from_run_id: STAGE.atmo-atmo
+   config_files:
+    - config/master_ocean_finetuning.yml
+   options:
+    - wgtags.exp=atmo-atmo_ft
+
+ - name: sst+atmo-atmo_ft
+   stage: train
+   from_run_id: STAGE.sst+atmo-atmo
+   config_files:
+    - config/master_ocean_finetuning.yml
+   options:
+    - wgtags.exp=sst+atmo-atmo_ft
+
+ - name: sst+atmo-atmo+rad_ft
+   stage: train
+   from_run_id: STAGE.sst+atmo-atmo+rad
+   config_files:
+    - config/master_ocean_finetuning.yml
+   options:
+    - wgtags.exp=sst+atmo-atmo+rad_ft
