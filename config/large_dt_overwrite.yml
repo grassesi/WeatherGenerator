@@ -1,10 +1,10 @@
 training_config:
-  time_window_step: '24:00:00'
-  time_window_len: '24:00:00'
+  time_window_step: '96:00:00'
+  time_window_len: '96:00:00'
 
-  forecast: {time_step: '24:00:00'}
+  forecast: {time_step: '96:00:00'}
 
 streams:
-  ERA5-Ocean: {frequency: '24:00:00'}
-  ERA5: {frequency: '24:00:00'}
-  ERA5-radiation: {frequency: '24:00:00'}
+  ERA5-Ocean: {frequency: '96:00:00', average_window: True}
+  ERA5: {frequency: '96:00:00', average_window: True}
+  ERA5-radiation: {frequency: '96:00:00', average_window: True}
