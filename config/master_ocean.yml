@@ -170,14 +170,15 @@ training_config:
       beta2 : 0.9875  # == 0.90 on 2 nodes x 4 gpus
       eps : 2e-08
 
-  losses : {
+  losses: {
     "physical": {
-        type: LossPhysical,
-        loss_fcts: {
-          mse: { },
-          dynamic_loss: {window: 100, L: 20.0}
-        },
+      type: LossPhysical,
+      loss_fcts: {
+        "mse": { },
+        "dynamic_loss": { window: 100, L: 20.0 }
+      },
     }
+  }
   
   model_input: {
     "forecasting" : {
@@ -204,7 +205,7 @@ validation_config:
   
   # whether to track the exponential moving average of weights for validation
   validate_with_ema: 
-    enabled : True
+    enabled : False
     ema_ramp_up_ratio: 0.09
     ema_halflife_in_thousands: 1e-3
 

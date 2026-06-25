@@ -14,7 +14,7 @@ ERA5-radiation :
   # insolation excluded since computed forcing
   source : ['avg_sdlwrf', 'avg_sdswrf']
   target : []
-  is_dynamic_forcing: True
+  is_dynamic_forcing: false
   loss_weight : 1.
   location_weight : cosine_latitude
   masking_rate : 0.6

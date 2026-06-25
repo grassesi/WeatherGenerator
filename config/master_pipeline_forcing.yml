@@ -5,6 +5,7 @@ stages:
    stage: train
    from_run_id: ???
    options:
+    - streams.ERA5.is_dynamic_forcing=True
     - wgtags.grid=master-coupling-forcing-ft-01
     - wgtags.exp=atmosurface+sst-sst
 
@@ -12,6 +13,8 @@ stages:
    stage: train
    from_run_id: ???
    options:
+    - streams.ERA5.is_dynamic_forcing=True
+    - streams.ERA5-radiation.is_dynamic_forcing=True
     - wgtags.grid=master-coupling-forcing-ft-01
     - wgtags.exp=rad+atmosurface+sst-sst
 # finetuning atmo
@@ -19,6 +22,8 @@ stages:
    stage: train
    from_run_id: ???
    options:
+   # is ERA5 also needed? inject insolation geoinfo -> goes to decoder -> frozen :|
+    - streams.ERA5-Ocean.is_dynamic_forcing=True
     - wgtags.grid=master-coupling-forcing-ft-01
     - wgtags.exp=sst+atmo-atmo_ft
 
@@ -26,5 +31,6 @@ stages:
    stage: train
    from_run_id: ???
    options:
+    - streams.ERA5-Ocean.is_dynamic_forcing=True
     - wgtags.grid=master-coupling-forcing-ft-01
     - wgtags.exp=sst+atmo-atmo+rad_ft
