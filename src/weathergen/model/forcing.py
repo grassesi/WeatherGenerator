@@ -82,7 +82,7 @@ class ForcedModel(Model):
         for step in source_samples.get_output_idxs():
             forcing_idx = step - output_offset
 
-            if self.forcing_engine and dynamic_forcings.forcing_streams:
+            if self.forcing_engine and not dynamic_forcings.is_empty:
                 # reembedd forcings
                 forcing_sampling_idxs = [
                     sample_idx + forcing_idx for sample_idx in source_sampling_idxs
@@ -121,6 +121,9 @@ class ForcingInput:
         self.time_window_handler = time_window_handler
         self.tokenizer = tokenizer
         self.tokenize_spacetime = True  # TODO hardcoded, do properly
+
+    def is_empty(self) -> bool:
+        return len(self.forcing_streams) == 0
 
     def get_data(
         self, sampling_idxs: list[int], meta_infos: list[dict[str, torch.Tensor]]
