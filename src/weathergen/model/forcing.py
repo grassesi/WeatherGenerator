@@ -16,6 +16,7 @@ from weathergen.datasets.utils import get_tokens_lens
 from weathergen.model.attention import MultiCrossAttentionHeadVarlen
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelOutput, ModelParams
+from weathergen.model.utils import get_num_parameters
 from weathergen.utils.utils import get_dtype
 
 
@@ -23,7 +24,16 @@ class ForcedModel(Model):
     def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size):
         super().__init__(cf, sources_size, targets_num_channels, targets_coords_size)
 
-        self.forcing_engine = ForcingEngine(self.cf, self.cf.get("fe_num_blocks", 1))
+        self.forcing_engine = ForcingEngine(self.cf, self.cf.get("ffe_num_blocks", 0))
+
+    def _gather_parameters(self) -> dict[str, int]:
+        num_params = super()._gather_parameters()
+        num_params["ffe"] = get_num_parameters(self.forcing_engine.blocks)
+        return num_params
+
+    def _print_components(self, num_params):
+        super()._print_components(num_params)
+        print(f" Forecast forcing engine: {num_params['ffe']:,}")
 
     def forward(
         self,
