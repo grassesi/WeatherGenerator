@@ -437,17 +437,27 @@ def load_merge_configs(
 
 def _resolve_streams(base_conf: Config, overwrites: list[Config]) -> Config:
     """Resolve streams properly: """
-    streams_directory = base_conf.streams_directory
+    streams_directory = base_conf.get("streams_directory")
+    _original_streams_directory = streams_directory
+
     for overwrite in overwrites:
         streams_directory = overwrite.get("streams_directory", streams_directory)
+    
+    assert streams_directory is not None and Path(streams_directory).is_dir(), \
+        f"{streams_directory} is not a valid directory."
 
-    is_streams_unintialized = "streams" in OmegaConf.missing_keys(base_conf) or not base_conf.get("streams")
-    is_stream_dir_changed = base_conf.streams_directory != streams_directory
+    is_streams_unintialized = (
+        "streams" in OmegaConf.missing_keys(base_conf) or not base_conf.get("streams")
+    )
+    is_stream_dir_changed = _original_streams_directory != streams_directory
     if is_streams_unintialized or is_stream_dir_changed:
         logging.info(f"Loading streams from streams directory: {streams_directory}.")
         streams = load_streams(Path(streams_directory))
     else:
-        logging.info(f"Stream confs exist and streams directory has not changed: No need to reload streams from directory.")
+        logging.info(
+            "Stream confs exist and streams directory has not changed:"+
+            "No need to reload streams from directory."
+        )
         streams = base_conf.streams
     
     for overwrite in overwrites:
@@ -457,7 +467,9 @@ def _resolve_streams(base_conf: Config, overwrites: list[Config]) -> Config:
             try:
                 streams[stream_name] = OmegaConf.merge(streams[stream_name], stream_conf)
             except KeyError as e:
-                logging.warning(f"Trying to overwrite non existing stream: {stream_name}, make sure the correct streams directory is used.)")
+                logging.warning("Trying to overwrite non existing stream:"
+                    +f"{stream_name}, make sure the correct streams directory is used."
+                )
 
     return streams
 
