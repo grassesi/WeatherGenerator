@@ -591,71 +591,79 @@ class Model(torch.nn.Module):
 
     def print_num_parameters(self) -> None:
         """Print number of parameters for entire model and each module used to build the model"""
-
-        num_params_embed = [
-            get_num_parameters(self.encoder.embed_engine.embeds[name])
-            for name in self.streams.keys()
-        ]
-        num_params_total = get_num_parameters(self)
-        num_params_ae_local = get_num_parameters(self.encoder.ae_local_engine.ae_local_blocks)
-        num_params_ae_global = get_num_parameters(self.encoder.ae_global_engine.ae_global_blocks)
-
-        num_params_q_cells = (
-            np.prod(self.encoder.q_cells.shape) if self.encoder.q_cells.requires_grad else 0
-        )
-        num_params_ae_adapter = get_num_parameters(self.encoder.ae_local_global_engine)
-
-        num_params_ae_aggregation = get_num_parameters(
-            self.encoder.ae_aggregation_engine.ae_aggregation_blocks
-        )
-
-        num_params_latent_heads = get_num_parameters(self.latent_heads)
-        num_params_latent_heads += get_num_parameters(self.latent_pre_norm)
-
-        num_params_fe = get_num_parameters(self.forecast_engine.fe_blocks)
-
-        mdict = self.embed_target_coords
-        num_params_embed_tcs = [
-            get_num_parameters(mdict[name]) if mdict and name in mdict else 0
-            for name in self.streams.keys()
-        ]
-        mdict = self.target_token_engines
-        num_params_tte = [
-            get_num_parameters(mdict[name]) if mdict and name in mdict else 0
-            for name in self.streams.keys()
-        ]
-        mdict = self.pred_heads
-        num_params_preds = [
-            get_num_parameters(mdict[name]) if mdict and name in mdict else 0
-            for name in self.streams.keys()
-        ]
+        
+        num_params = self._gather_parameters()
 
         print("-----------------")
-        print(f"Total number of trainable parameters: {num_params_total:,}")
-        print("Number of parameters:")
-        print("  Embedding networks:")
-        [
-            print("    {} : {:,}".format(si["name"], np))
-            for si, np in zip(self.streams.values(), num_params_embed, strict=False)
-        ]
-        print(f" Local assimilation engine: {num_params_ae_local:,}")
-        print(f" Local-global adapter: {num_params_ae_adapter:,}")
-        print(f" Learnable queries: {num_params_q_cells:,}")
-        print(f" Query Aggregation engine: {num_params_ae_aggregation:,}")
-        print(f" Global assimilation engine: {num_params_ae_global:,}")
-        print(f" Latent prediction heads and pre-norm: {num_params_latent_heads:,}")
-        print(f" Forecast engine: {num_params_fe:,}")
-        print(" coordinate embedding, prediction networks and prediction heads:")
+        self._print_components(num_params)
         zps = zip(
             self.streams.keys(),
-            num_params_embed_tcs,
-            num_params_tte,
-            num_params_preds,
+            num_params['embed_tcs'],
+            num_params['tte'],
+            num_params['preds'],
             strict=False,
         )
         for stream_name, np0, np1, np2 in zps:
             print(f"   {stream_name} : {np0:,} / {np1:,} / {np2:,}")
         print("-----------------")
+    
+    def _print_components(self, num_params):
+        print(f"Total number of trainable parameters: {num_params['total']:,}")
+        print("Number of parameters:")
+        print("  Embedding networks:")
+        [
+            print("    {} : {:,}".format(si["name"], np))
+            for si, np in zip(self.streams.values(), num_params["embed"], strict=False)
+        ]
+        print(f" Local assimilation engine: {num_params['ae_local']:,}")
+        print(f" Local-global adapter: {num_params['ae_adapter']:,}")
+        print(f" Learnable queries: {num_params['q_cells']:,}")
+        print(f" Query Aggregation engine: {num_params['ae_aggregation']:,}")
+        print(f" Global assimilation engine: {num_params['ae_global']:,}")
+        print(f" Latent prediction heads and pre-norm: {num_params['latent_heads']:,}")
+        print(f" Forecast engine: {num_params['fe']:,}")
+        print(" coordinate embedding, prediction networks and prediction heads:")
+
+    def _gather_parameters(self) -> dict[str, int]:
+        num_params = {}
+        num_params["embed"] = [
+            get_num_parameters(self.encoder.embed_engine.embeds[name])
+            for name in self.streams.keys()
+        ]
+        num_params["total"] = get_num_parameters(self)
+        num_params["ae_local"] = get_num_parameters(self.encoder.ae_local_engine.ae_local_blocks)
+        num_params["ae_global"] = get_num_parameters(self.encoder.ae_global_engine.ae_global_blocks)
+
+        num_params["q_cells"] = (
+            np.prod(self.encoder.q_cells.shape) if self.encoder.q_cells.requires_grad else 0
+        )
+        num_params["ae_adapter"] = get_num_parameters(self.encoder.ae_local_global_engine)
+
+        num_params["ae_aggregation"] = get_num_parameters(
+            self.encoder.ae_aggregation_engine.ae_aggregation_blocks
+        )
+
+        num_params["latent_heads"] = get_num_parameters(self.latent_heads)
+        num_params["latent_heads"] += get_num_parameters(self.latent_pre_norm)
+
+        num_params["fe"] = get_num_parameters(self.forecast_engine.fe_blocks)
+
+        mdict = self.embed_target_coords
+        num_params["embed_tcs"] = [
+            get_num_parameters(mdict[name]) if mdict and name in mdict else 0
+            for name in self.streams.keys()
+        ]
+        mdict = self.target_token_engines
+        num_params["tte"] = [
+            get_num_parameters(mdict[name]) if mdict and name in mdict else 0
+            for name in self.streams.keys()
+        ]
+        mdict = self.pred_heads
+        num_params["preds"] = [
+            get_num_parameters(mdict[name]) if mdict and name in mdict else 0
+            for name in self.streams.keys()
+        ]
+        return num_params
 
     def tokens_to_latent_state(self, tokens_post_norm, tokens) -> LatentState:
         """
@@ -781,7 +789,7 @@ class Model(torch.nn.Module):
                 for i_b in range(batch_size)
             ]
             t_coords_lens = [len(t) for t in t_coords]
-            t_coords = torch.cat(t_coords) # first column contains stream_id
+            t_coords = torch.cat(t_coords)  # first column contains stream_id
 
             if len(t_coords) == 0:
                 continue
