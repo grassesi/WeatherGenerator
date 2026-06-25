@@ -64,8 +64,7 @@ class ForcedModel(Model):
                 if stream_data is not None
             }
             assert len(sample_idxs) == 1, (
-                "Expected exactly one sampling index per sample, "
-                f"got {sorted(sample_idxs)}."
+                f"Expected exactly one sampling index per sample, got {sorted(sample_idxs)}."
             )
             source_sampling_idxs.append(next(iter(sample_idxs)))
         # output_idxs start with output_offset
@@ -123,7 +122,9 @@ class ForcingInput:
         self.tokenizer = tokenizer
         self.tokenize_spacetime = True  # TODO hardcoded, do properly
 
-    def get_data(self, sampling_idxs: list[int], meta_infos: list[dict[str, torch.Tensor]]) -> BatchSamples:
+    def get_data(
+        self, sampling_idxs: list[int], meta_infos: list[dict[str, torch.Tensor]]
+    ) -> BatchSamples:
         """
         Sample all forcing sources for the input window corresponding to a rollout step.
 
@@ -139,9 +140,7 @@ class ForcingInput:
             f"got {len(sampling_idxs)} indices for {len(meta_infos)} samples."
         )
 
-        forcing_stream_infos = [
-            readers[0].stream_info for readers in self.forcing_streams.values()
-        ]
+        forcing_stream_infos = [readers[0].stream_info for readers in self.forcing_streams.values()]
         forcing_samples = BatchSamples(
             streams=forcing_stream_infos,
             num_samples=len(samples),
@@ -277,7 +276,9 @@ class ForcingEngine(torch.nn.Module):
     def forward(self, latent_tokens, forcing_tokens):
         # MultiCrossAttentionHeadVarlen expects flattened varlen tokens + lens vectors.
         # Here we adapt from batched [B, T, D] tensors and restore shape afterwards.
-        assert latent_tokens.ndim == 3, f"Expected latent_tokens to be [B,T,D], got {latent_tokens.shape}"
+        assert latent_tokens.ndim == 3, (
+            f"Expected latent_tokens to be [B,T,D], got {latent_tokens.shape}"
+        )
         assert forcing_tokens.ndim == 3, (
             f"Expected forcing_tokens to be [B,T,D], got {forcing_tokens.shape}"
         )
@@ -298,7 +299,9 @@ class ForcingEngine(torch.nn.Module):
             forcing_len = forcing_tokens.shape[1]
 
         latent_tokens_flat = latent_tokens.reshape(batch_size * latent_len, dim_embed)
-        forcing_tokens_flat = forcing_tokens.reshape(batch_size * forcing_len, forcing_tokens.shape[-1])
+        forcing_tokens_flat = forcing_tokens.reshape(
+            batch_size * forcing_len, forcing_tokens.shape[-1]
+        )
 
         latent_lens = torch.full(
             (batch_size + 1,), fill_value=latent_len, dtype=torch.int32, device=latent_tokens.device
