@@ -32,6 +32,6 @@ training_config:
 
   forecast :
       offset: 1
-      num_steps: 16 # TODO: check for OOM, target 4 days => adjust for longer steps
+      num_steps: 10 # originally 16 TODO: check for OOM reduce to 12, target 4 days => adjust for longer steps 8 ~0.095 s/sec 12 OOM 10 ~ 0.076
       policy: "fixed"
 
