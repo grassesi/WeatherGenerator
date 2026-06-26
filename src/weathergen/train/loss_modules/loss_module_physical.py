@@ -105,6 +105,7 @@ class LossPhysical(LossModuleBase):
         self.stage = stage
         self.device = device
         self.name = "LossPhysical"
+        self.forecast_offset = self.mode_cfg.forecast.offset
 
         # Dynamic Loss state (extract it before parsing the actual loss functions)
         self.dynamic_loss_cfg = loss_fcts.get("dynamic_loss")
@@ -392,7 +393,7 @@ class LossPhysical(LossModuleBase):
                         # Update EMA for dynamic loss if enabled
                         if (
                             self.dynamic_loss_ema.enabled
-                            and timestep_idx == 0
+                            and timestep_idx == self.forecast_offset
                             and loss_fct_name == "mse"
                             and not is_spoof
                         ):
