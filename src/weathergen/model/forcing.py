@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 import itertools as it
 
@@ -51,24 +52,12 @@ class ForcedModel(Model):
             A list containing all prediction results
         """
 
-        output = ModelOutput(source_samples.get_output_len())
-        source_masks = [
-            {stream: meta_info.mask for stream, meta_info in sample.meta_info.items()}
-            for sample in source_samples.samples
-        ]
-        source_sampling_idxs = []
-        for sample in source_samples.samples:
-            sample_idxs = {
-                stream_data.sample_idx
-                for stream_data in sample.streams_data.values()
-                if stream_data is not None
-            }
-            assert len(sample_idxs) == 1, (
-                f"Expected exactly one sampling index per sample, got {sorted(sample_idxs)}."
-            )
-            source_sampling_idxs.append(next(iter(sample_idxs)))
+        source_masks, source_sampling_idxs = self._get_source_masks_sample_idxs(source_samples)
+
         # output_idxs start with output_offset
         output_offset = source_samples.get_output_idxs()[0]
+
+        output = ModelOutput(source_samples.get_output_len())
 
         tokens, posteriors = self.encoder(model_params, source_samples)
         output.add_latent_prediction(0, "posteriors", posteriors)
@@ -78,6 +67,8 @@ class ForcedModel(Model):
         # collapse along input step dimension
         tokens = tokens.reshape(shape).sum(axis=1)
 
+        # Allow for pushforward trick TODO: enable
+        p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
         # roll-out in latent space, iterate and generate output over requested output steps
         for step in source_samples.get_output_idxs():
             forcing_idx = step - output_offset
@@ -94,16 +85,41 @@ class ForcedModel(Model):
                 # combine forcings with current latent space
                 tokens = self.forcing_engine(tokens, forcing_tokens)
 
-            # apply forecasting engine (if present)
-            if self.forecast_engine:
-                tokens = self.forecast_engine(tokens, forcing_idx, coords=model_params.rope_coords)
+            without_grad = p_fwd and self.training and step != max(source_samples.get_output_idxs())
+            if without_grad:
+                # Pushforward mode: advance tokens without grad; no decoding with torch.no_grad():
+                tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
+                continue
 
+            tokens = self.forecast_engine(tokens, forcing_idx, coords=model_params.rope_coords)
             # decoder predictions
             output = self.predict_decoders(model_params, step, tokens, source_samples, output)
             # latent predictions (raw and with SSL heads)
             output = self.predict_latent(model_params, step, tokens, source_samples, output)
 
         return output
+
+    def _get_source_masks_sample_idxs(
+        self, source_samples: BatchSamples
+    ) -> tuple[list[dict[str, Any]], list[int]]:
+        source_masks = [
+            {stream: meta_info.mask for stream, meta_info in sample.meta_info.items()}
+            for sample in source_samples.samples
+        ]
+
+        source_sampling_idxs = []
+        for sample in source_samples.samples:
+            sample_idxs = {
+                stream_data.sample_idx
+                for stream_data in sample.streams_data.values()
+                if stream_data is not None
+            }
+            assert len(sample_idxs) == 1, (
+                f"Expected exactly one sampling index per sample, got {sorted(sample_idxs)}."
+            )
+            source_sampling_idxs.append(next(iter(sample_idxs)))
+
+        return source_masks, source_sampling_idxs
 
 
 class ForcingInput:
