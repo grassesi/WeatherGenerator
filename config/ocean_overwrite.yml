@@ -17,6 +17,6 @@ test_config:
   forecast: {num_steps: 31} # adjust for bigger timestep
 
 streams:
-  ERA5-Ocean: {frequency: '96:00:00', average_window: True}
-  ERA5: {frequency: '96:00:00', average_window: True}
-  ERA5-radiation: {frequency: '96:00:00', average_window: True}
+  ERA5-Ocean: {frequency: '24:00:00', average_window: True}
+  ERA5: {frequency: '06:00:00', average_window: True}
+  ERA5-radiation: {frequency: '06:00:00', average_window: True}
