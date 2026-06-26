@@ -3,7 +3,7 @@ import typing
 import numpy as np
 import pandas as pd
 
-from weathergen.datasets.data_reader_base import DataReaderTimestep, TIndex, ReaderData
+from weathergen.datasets.data_reader_base import DataReaderTimestep, ReaderData, TIndex
 
 AVERAGING_GEOINFOS = ["z", "insolation"]
 
