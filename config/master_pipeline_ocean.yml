@@ -1,7 +1,19 @@
 parallelize: True
 stages:
 # pretraining
- - name: atmosurface+sst-sst
+ - name: sst-sst
+   stage: train
+   chain_jobs: 3
+   base_config: config/master_ocean.yml
+   config_files:
+    - config/ocean_overwrite.yml
+   options:
+    - streams_directory=./config/streams/ocean_master/
+    - ae_local_num_blocks=0 # disable local assimilation for just sst
+    - wgtags.grid=master-coupling-ocean-01
+    - wgtags.exp=sst-sst
+
+ - name: atmosurface-sst
    stage: train
    chain_jobs: 3
    base_config: config/master_ocean.yml
@@ -10,9 +22,9 @@ stages:
    options:
     - streams_directory=./config/streams/ocean_master/
     - wgtags.grid=master-coupling-ocean-01
-    - wgtags.exp=atmosurface+sst-sst
+    - wgtags.exp=atmosurface-sst
 
- - name: rad+atmosurface+sst-sst
+ - name: rad+atmosurface-sst
    stage: train
    chain_jobs: 3
    base_config: config/master_ocean_overwrite.yml
@@ -21,4 +33,4 @@ stages:
    options:
     - streams_directory=./config/streams/ocean_master_rad/
     - wgtags.grid=master-coupling-ocean-01
-    - wgtags.exp=rad+atmosurface+sst-sst
+    - wgtags.exp=rad+atmosurface-sst
