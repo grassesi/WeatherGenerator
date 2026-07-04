@@ -36,26 +36,26 @@ stages:
     - wgtags.exp=sst+atmo-atmo+rad_pre
 
 # finetuning
- - name: atmo-atmo_ft
-   stage: train
-   from_run_id: STAGE.atmo-atmo
-   config_files:
-    - config/master_ocean_finetuning.yml
-   options:
-    - wgtags.exp=atmo-atmo_ft
+#  - name: atmo-atmo_ft
+#    stage: train
+#    from_run_id: STAGE.atmo-atmo
+#    config_files:
+#     - config/master_ocean_finetuning.yml
+#    options:
+#     - wgtags.exp=atmo-atmo_ft
 
- - name: sst+atmo-atmo_ft
-   stage: train
-   from_run_id: STAGE.sst+atmo-atmo
-   config_files:
-    - config/master_ocean_finetuning.yml
-   options:
-    - wgtags.exp=sst+atmo-atmo_ft
+#  - name: sst+atmo-atmo_ft
+#    stage: train
+#    from_run_id: STAGE.sst+atmo-atmo
+#    config_files:
+#     - config/master_ocean_finetuning.yml
+#    options:
+#     - wgtags.exp=sst+atmo-atmo_ft
 
- - name: sst+atmo-atmo+rad_ft
-   stage: train
-   from_run_id: STAGE.sst+atmo-atmo+rad
-   config_files:
-    - config/master_ocean_finetuning.yml
-   options:
-    - wgtags.exp=sst+atmo-atmo+rad_ft
+#  - name: sst+atmo-atmo+rad_ft
+#    stage: train
+#    from_run_id: STAGE.sst+atmo-atmo+rad
+#    config_files:
+#     - config/master_ocean_finetuning.yml
+#    options:
+#     - wgtags.exp=sst+atmo-atmo+rad_ft

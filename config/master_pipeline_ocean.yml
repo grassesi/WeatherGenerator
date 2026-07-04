@@ -8,8 +8,9 @@ stages:
    config_files:
     - config/ocean_overwrite.yml
    options:
-    - streams_directory=./config/streams/ocean_master/
+    - streams_directory=./config/streams/ocean_master_only_sst/
     - ae_local_num_blocks=0 # disable local assimilation for just sst
+    - streams.ERA5-Ocean.source=["sst"]
     - wgtags.grid=master-coupling-ocean-01
     - wgtags.exp=sst-sst
 

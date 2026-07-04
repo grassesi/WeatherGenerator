@@ -1,0 +1,24 @@
+parallelize: True 
+ - name: atmo-atmo_ft
+   stage: train
+   from_run_id: js6ffvw0
+   config_files:
+    - config/master_ocean_finetuning.yml
+   options:
+    - wgtags.exp=atmo-atmo_ft
+
+ - name: sst+atmo-atmo_ft
+   stage: train
+   from_run_id: sso03cvj
+   config_files:
+    - config/master_ocean_finetuning.yml
+   options:
+    - wgtags.exp=sst+atmo-atmo_ft
+
+ - name: sst+atmo-atmo+rad_ft
+   stage: train
+   from_run_id: aejy29gs
+   config_files:
+    - config/master_ocean_finetuning.yml
+   options:
+    - wgtags.exp=sst+atmo-atmo+rad_ft
