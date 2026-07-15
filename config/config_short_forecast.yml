@@ -1,0 +1,9 @@
+test_config:
+  start_date: 2023-01-01T00:00
+  end_date: 2023-12-31T00:00
+
+  samples_per_mini_epoch: 1 # one month
+  init_freq: "half"
+  output :
+    num_samples: 1
+  forecast: {num_steps: 60} # ~ 2 wochen

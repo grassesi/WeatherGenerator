@@ -1,0 +1,32 @@
+evaluation:
+  metrics: ["rmse"]
+  # regions: ["global", "nhem"] # Have regions here, if you want for them to apply to all streams (scores calculation)
+  summary_plots : true
+  ratio_plots : false
+  heat_maps : false
+  summary_dir: "./plots/"
+  plot_ensemble: false #supported: false, "std", "minmax", "members"
+  plot_score_maps: true #plot scores on a 2D maps. it slows down score computation
+  plot_score_animations: false #plot animations of score maps across forecast steps. it slows down score computation
+  print_summary: false #print out score values on screen. it can be verbose
+  log_scale: false
+  add_grid: false
+  score_cards: false
+  bar_plots: false
+  #agg_dims: ["ipoint"] #----> NOTE: advanced! Handle with care. This will average the scores across the specified list of dimensions. Supported dimensions: "ipoint", "sample", "forecast_step", "ensemble". Use with caution, as it can hide important details about the model performance. 
+
+
+default_streams:
+  ERA5:
+    regions: ["global"]
+    channels: ["2t", "10u", "10v", "z_500", "t_850", "u_850"]
+    evaluation:
+      forecast_step: "all"
+      sample: "all"
+      ensemble: "all" #supported: "all", "mean", [0,1,2]
+    plotting:
+      sample: [0]
+      forecast_step: "all" #supported: "all", [1,2,3,...], "1-50" (equivalent of [1,2,3,...50])
+      plot_maps: true
+      plot_histograms: false
+      plot_animations: true
