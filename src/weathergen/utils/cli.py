@@ -9,10 +9,11 @@ class Stage(enum.StrEnum):
     train = enum.auto()
     train_continue = enum.auto()
     inference = enum.auto()
+    coupled_inference = enum.auto()
 
 
 def get_main_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser = argparse.ArgumentParser(allow_abbrev=False, exit_on_error=False)
     subparsers = parser.add_subparsers(dest="stage")
 
     train_parser = subparsers.add_parser(
@@ -28,8 +29,13 @@ def get_main_parser() -> argparse.ArgumentParser:
     inference_parser = subparsers.add_parser(
         Stage.inference,
         help="Run infernce on a trained WeatherGenerator configuration",
+        exit_on_error=False
     )
     _add_inference_args(inference_parser)
+    coupling_parser = subparsers.add_parser(
+        Stage.coupled_inference, help="Run coupled inference configuration."
+    )
+    _add_coupling_args(coupling_parser)
 
     return parser
 
@@ -74,23 +80,19 @@ def _add_continue_args(parser: argparse.ArgumentParser):
 
 
 def _add_inference_args(parser: argparse.ArgumentParser):
-    subparsers = parser.add_subparsers(dest="strategy")
-    
-    simple_inference = subparsers.add_parser("simple")
-    _add_model_loading_params(simple_inference)
-    
-    coupled_inference = subparsers.add_parser("coupled")
-    coupled_inference.add_argument(
-        "couplings",
-        help="yaml config file containing couplings."
-    )
-    coupled_inference.add_argument(
+    _add_model_loading_params(parser)
+    _add_general_arguments(parser)
+
+
+def _add_coupling_args(parser: argparse.ArgumentParser):
+    parser.add_argument("couplings", help="yaml config file containing couplings.")
+    parser.add_argument(
         "components",
         nargs="+",
         default="[]",
-        help="Assign model ideas to coupling components: '<Component>= <run_id>@<mini-epoch>, ...'."
+        help="Assign model ideas to coupling components: '<Component>= <run_id>@<mini-epoch>, ...'.",
     )
-    
+
     _add_general_arguments(parser)
 
 

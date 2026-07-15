@@ -48,9 +48,24 @@ def main(argl: list[str]):
         argl = _fix_argl(argl)
     except ValueError as e:
         logger.error(str(e))
-
+    
     parser = cli.get_main_parser()
+    try:
+        args = parser.parse_args(argl)
+    except Exception: # catch parser error
+        if argl[0] == cli.Stage.inference:
+            logger.info(
+                "Failed first attempt at parsing inference args. \
+                Trying to parse args for coupled inference."
+            )
+            argl[0] = cli.Stage.coupled_inference
+        
+        args = parser.parse_args(argl)
+        # TODO fix No such file or directory: '/iopsstor/scratch/cscs/thunter/slurm/slurm_weathergen_gw9ubto2_dir/WeatherGenerator/config/compare_config_list.yml'
+        # TODO check/fix forecast conditioning (log rx9kc5x2)
+
     args = parser.parse_args(argl)
+
     match args.stage:
         case cli.Stage.train:
             run_train(args)
@@ -58,6 +73,8 @@ def main(argl: list[str]):
             run_continue(args)
         case cli.Stage.inference:
             run_inference(args)
+        case cli.Stage.coupled_inference:
+            run_coupled_inference(args) 
         case _:
             logger.error("No stage was found.")
 
@@ -75,7 +92,7 @@ def _fix_argl(argl):  # TODO remove this fix after grace period
             raise ValueError(msg) from e
 
         argl = [stage] + argl
-
+    
     return argl
 
 
@@ -86,33 +103,29 @@ def run_inference(args):
     Note: Additional configuration for inference (`test_config`) is set in the function.
     """
 
-    if args.strategy == "simple":
-        cli_overwrite = config.from_cli_arglist(args.options)
-        cf = config.load_merge_configs(
-            args.private_config,
-            args.from_run_id,
-            args.mini_epoch,
-            args.base_config,
-            *args.config,
-            {},
-            cli_overwrite,
-        )
-        cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
+    cli_overwrite = config.from_cli_arglist(args.options)
+    cf = config.load_merge_configs(
+        args.private_config,
+        args.from_run_id,
+        args.mini_epoch,
+        args.base_config,
+        *args.config,
+        {},
+        cli_overwrite,
+    )
+    cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
 
-        devices = Trainer.init_torch()
-        cf = Trainer.init_ddp(cf)
+    devices = Trainer.init_torch()
+    cf = Trainer.init_ddp(cf)
 
-        init_loggers(cf.general.run_id)
+    init_loggers(cf.general.run_id)
 
-        logger.info(f"DDP initialization: rank={cf.rank}, world_size={cf.world_size}")
+    logger.info(f"DDP initialization: rank={cf.rank}, world_size={cf.world_size}")
 
-        cf.general.run_history += [(args.from_run_id, cf.general.istep)]
+    cf.general.run_history += [(args.from_run_id, cf.general.istep)]
 
-        trainer = Trainer(cf.train_logging)
-    elif args.strategy == "coupled":
-        coupling = Coupling.from_args(args.components)
-        print(coupling)
-        exit()
+    trainer = Trainer(cf.train_logging)
+
     try:
         trainer.inference(cf, devices, args.from_run_id, args.mini_epoch)
     except Exception:
@@ -120,6 +133,12 @@ def run_inference(args):
         traceback.print_exc()
         if cf.world_size == 1:
             pdb.post_mortem(tb)
+
+
+def run_coupled_inference(args):
+    coupling = Coupling.from_args(args.components)
+    print(coupling)
+    exit()
 
 
 def run_continue(args):
