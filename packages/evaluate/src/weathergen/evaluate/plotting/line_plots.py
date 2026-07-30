@@ -666,4 +666,4 @@ class LinePlots:
         cbar.set_label(rf"{metric} - $t_{{\mathrm{{step}}}}[0] / t_{{\mathrm{{step}}}}[x]$")
         parts = ["heat_map", metric, tag]
         name = "_".join(filter(None, parts))
-        plt.savefig(f"{self.out_plot_dir.joinpath(name)}.{self.image_format}")
+        plt.savefig(f"{self.out_plot_dir_lines.joinpath(name)}.{self.image_format}")

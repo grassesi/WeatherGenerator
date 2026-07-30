@@ -198,6 +198,10 @@ class ItemKey:
     sample: int
     forecast_step: int
     stream: str
+    
+    def __post_init__(self):
+        self.sample = int(self.sample)
+        self.forecast_step = int(self.forecast_step)
 
     @property
     def path(self) -> str:
