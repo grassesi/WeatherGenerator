@@ -264,8 +264,15 @@ class ForcingEngine(torch.nn.Module):
     def __init__(self, cf: Config, n_blocks=1):
         super().__init__()
         self.cf = cf
+        
+        blocks = []
+        for _ in range(n_blocks):
+            blocks.extend(self.get_block())
 
-        block = [  # CrossAttention block, similiar to PerceiverIO
+        self.blocks = torch.nn.ModuleList(blocks)
+
+    def get_block(self) -> list[torch.Module]:
+        return [  # CrossAttention block, similiar to PerceiverIO
             MultiCrossAttentionHeadVarlen(
                 # both X_q and X_kv share the same dimensionality & semantics
                 dim_embed_q=self.cf.ae_global_dim_embed,
@@ -289,8 +296,6 @@ class ForcingEngine(torch.nn.Module):
                 norm_eps=self.cf.mlp_norm_eps,
             ),
         ]
-
-        self.blocks = torch.nn.ModuleList(block * n_blocks)
 
     def forward(self, latent_tokens, forcing_tokens):
         # MultiCrossAttentionHeadVarlen expects flattened varlen tokens + lens vectors.

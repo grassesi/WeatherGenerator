@@ -61,8 +61,6 @@ def main(argl: list[str]):
             argl[0] = cli.Stage.coupled_inference
         
         args = parser.parse_args(argl)
-        # TODO fix No such file or directory: '/iopsstor/scratch/cscs/thunter/slurm/slurm_weathergen_gw9ubto2_dir/WeatherGenerator/config/compare_config_list.yml'
-        # TODO check/fix forecast conditioning (log rx9kc5x2)
 
     args = parser.parse_args(argl)
 
