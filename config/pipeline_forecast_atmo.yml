@@ -1,0 +1,72 @@
+parallelize: True
+stages:
+# Atmo ========================
+  - name: infer_atmo-atmo_ft
+    stage: inference
+    from_run_id: gw9ubto2
+    slurm_args:
+     - '--time=00:30:00'
+# -----------------------------
+  - name: infer_sst+atmo-atmo_ft
+    stage: inference
+    from_run_id: c4jfjo6y
+    slurm_args:
+     - '--time=00:30:00'
+  - name: infer_sst+atmo-atmo_ft-forcing
+    stage: inference
+    from_run_id: xcpk26es
+    slurm_args:
+     - '--time=00:30:00'
+# -----------------------------
+  - name: infer_sst+atmo-atmo+rad_ft
+    stage: inference
+    from_run_id: w31y9ktt
+    slurm_args:
+     - '--time=00:30:00'
+  - name: infer_sst+atmo-atmo+rad_ft-forcing
+    stage: inference
+    from_run_id: j5h3is35
+    slurm_args:
+     - '--time=00:30:00'
+# export Atmo =================
+  - name: export_atmo-atmo_ft
+    stage: export
+    format: "netcdf"
+    channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
+    stream: ERA5
+    type: [target, prediction]
+    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    from_run_id: STAGE.infer_atmo-atmo_ft
+  - name: export_sst+atmo-atmo_ft
+    stage: export
+    format: "netcdf"
+    channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
+    stream: ERA5
+    type: [target, prediction]
+    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    from_run_id: STAGE.infer_sst+atmo-atmo_ft
+  - name: export_sst+atmo-atmo_ft-forcing
+    stage: export
+    format: "netcdf"
+    channels: [z_500, t_850, z_850, 10u, "10v", "2t"]
+    channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
+    stream: ERA5
+    type: [target, prediction]
+    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    from_run_id: STAGE.infer_sst+atmo-atmo_ft-forcing
+  - name: export_sst+atmo-atmo+rad_ft
+    stage: export
+    format: "netcdf"
+    channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
+    stream: ERA5
+    type: [target, prediction]
+    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    from_run_id: STAGE.infer_sst+atmo-atmo+rad_ft
+  - name: export_sst+atmo-atmo+rad_ft-forcing
+    stage: export
+    format: "netcdf"
+    channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
+    stream: ERA5
+    type: [target, prediction]
+    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    from_run_id: STAGE.infer_sst+atmo-atmo+rad_ft-forcing

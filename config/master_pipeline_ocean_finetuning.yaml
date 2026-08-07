@@ -1,0 +1,27 @@
+parallelize: True
+stages:
+ - name: sst-sst
+   stage: train
+   from_run_id: kesjm27i
+   chain_jobs: 3
+   config_files:
+    - config/master_ocean_finetuning.yml
+   options:
+    - wgtags.exp=sst-sst_ft
+ - name: atmosurface-sst_ft
+   stage: train
+   from_run_id: xnd28me5
+   chain_jobs: 3
+   config_files:
+    - config/master_ocean_finetuning.yml
+   options:
+    - wgtags.exp=atmosurface-sst_ft
+
+ - name: rad+atmosurface+sst_ft
+   stage: train
+   from_run_id: rz3aq45a
+   chain_jobs: 3
+   config_files:
+    - config/master_ocean_finetuning.yml
+   options:
+    - wgtags.exp=rad+atmosurface+sst_ft
