@@ -96,6 +96,14 @@ variables:
     wg_unit: m
     std_unit: m
     level_type: sfc
+  sst:
+    var: sst
+    long: sea_surface_temperature
+    std: sea_surface_temperature
+    wg_unit: K
+    std_unit: K
+    level_type: sfc
+   
   
 
 coordinates:
