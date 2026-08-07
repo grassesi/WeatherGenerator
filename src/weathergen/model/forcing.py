@@ -138,6 +138,7 @@ class ForcingInput:
         self.tokenizer = tokenizer
         self.tokenize_spacetime = True  # TODO hardcoded, do properly
 
+    @property
     def is_empty(self) -> bool:
         return len(self.forcing_streams) == 0
 
@@ -161,7 +162,7 @@ class ForcingInput:
 
         forcing_stream_infos = [readers[0].stream_info for readers in self.forcing_streams.values()]
         forcing_samples = BatchSamples(
-            streams=forcing_stream_infos,
+            streams_names=forcing_stream_infos,
             num_samples=len(samples),
             output_steps=1,
             output_idxs=None,  # not needed, since not used in encoder
@@ -259,8 +260,6 @@ class ForcingInput:
 
 
 class ForcingEngine(torch.nn.Module):
-    name: "ForcingEngine"  # TODO what the fuck is this, how is it used?
-
     def __init__(self, cf: Config, n_blocks=1):
         super().__init__()
         self.cf = cf
