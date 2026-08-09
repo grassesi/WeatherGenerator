@@ -1,3 +1,5 @@
+# ruff: noqa: T201
+
 from __future__ import annotations
 from typing import Any
 
@@ -39,7 +41,8 @@ class ForcedModel(Model):
     def forward(
         self,
         model_params: ModelParams,
-        source_samples: BatchSamples,
+        input: BatchSamples | ModelOutput,
+        forecast_steps: list[int],
         dynamic_forcings: ForcingInput,
     ) -> ModelOutput:
         """Forward pass of the model
@@ -47,31 +50,30 @@ class ForcedModel(Model):
         Tokens are processed through the model components, which were defined in the create method.
         Args:
             model_params : Query and embedding parameters
-            batch
+            input : the batch's source samples, or the previous chunk's output
+            forecast_steps : global forecast steps of the chunk to roll out
+            dynamic_forcings : forcing sources sampled per forecast step
         Returns:
             A list containing all prediction results
         """
+        source_samples, tokens, posteriors = self._get_initial_conditions(input, model_params)
 
         source_masks, source_sampling_idxs = self._get_source_masks_sample_idxs(source_samples)
 
         # output_idxs start with output_offset
-        output_offset = source_samples.get_output_idxs()[0]
+        forecast_offset = source_samples.get_output_idxs()[0]
 
-        output = ModelOutput(source_samples.get_output_len())
-
-        tokens, posteriors = self.encoder(model_params, source_samples)
-        output.add_latent_prediction(0, "posteriors", posteriors)
-
-        # recover batch dimension and separate input_steps
-        shape = (len(source_samples), source_samples.get_num_steps(), *tokens.shape[1:])
-        # collapse along input step dimension
-        tokens = tokens.reshape(shape).sum(axis=1)
+        output = ModelOutput(forecast_steps, forecast_offset, source_samples)
+        # posteriors come from encoding the source window, so they exist only on the first chunk
+        if posteriors is not None:
+            output.add_latent_prediction(0, "posteriors", posteriors)
 
         # Allow for pushforward trick TODO: enable
-        p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
         # roll-out in latent space, iterate and generate output over requested output steps
-        for step in source_samples.get_output_idxs():
-            forcing_idx = step - output_offset
+        p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
+        final_step = source_samples.get_output_idxs()[-1]
+        for step in forecast_steps:
+            forcing_idx = step - forecast_offset
 
             if self.forcing_engine and not dynamic_forcings.is_empty:
                 # reembedd forcings
@@ -85,13 +87,14 @@ class ForcedModel(Model):
                 # combine forcings with current latent space
                 tokens = self.forcing_engine(tokens, forcing_tokens)
 
-            without_grad = p_fwd and self.training and step != max(source_samples.get_output_idxs())
+            without_grad = p_fwd and self.training and step != final_step
             if without_grad:
-                # Pushforward mode: advance tokens without grad; no decoding with torch.no_grad():
-                tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
+                # Pushforward mode: advance tokens without grad; no decoding
+                with torch.no_grad():
+                    tokens = self.forecast_engine(tokens, step, coords=model_params.rope_coords)
                 continue
 
-            tokens = self.forecast_engine(tokens, forcing_idx, coords=model_params.rope_coords)
+            tokens = self.forecast_engine(tokens, step, coords=model_params.rope_coords)
             # decoder predictions
             output = self.predict_decoders(model_params, step, tokens, source_samples, output)
             # latent predictions (raw and with SSL heads)
@@ -162,7 +165,7 @@ class ForcingInput:
 
         forcing_stream_infos = [readers[0].stream_info for readers in self.forcing_streams.values()]
         forcing_samples = BatchSamples(
-            streams_names=forcing_stream_infos,
+            stream_names=forcing_stream_infos,
             num_samples=len(samples),
             output_steps=1,
             output_idxs=None,  # not needed, since not used in encoder
