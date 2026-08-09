@@ -589,6 +589,7 @@ class OutputBatchData:
 
     sample_start: int
     forecast_offset: int
+    forecast_steps: list[int]
 
     @functools.cached_property
     def samples(self):
@@ -596,13 +597,6 @@ class OutputBatchData:
 
         # TODO associate samples with the sampel idx used for the time window
         return np.arange(len(self.sources)) + self.sample_start
-
-    @functools.cached_property
-    def forecast_steps(self):
-        """Indices of all forecast steps adjusted by the forecast offset"""
-        # forecast offset should be either 1 for forecasting or 0 for MTM
-        assert self.forecast_offset in (0, 1)
-        return np.arange(len(self.targets) + self.forecast_offset)
 
     def items(self) -> typing.Generator[OutputItem, None, None]:
         """Iterate over possible output items"""
@@ -656,11 +650,12 @@ class OutputBatchData:
         To be useable in extraction these have to be adjusted to bridge the differences
         compared to the semantics of the data.
             - `sample` is adjusted from a global continous index to a per batch index
-            - `forecast_step` is adjusted from including `forecast_offset` to indexing
-               the data (always starts at 0)
+            - `forecast_step` is adjusted from a global step to an index into this chunk's data
         """
         return ItemKey(
-            key.sample - self.sample_start, key.forecast_step - self.forecast_offset, key.stream
+            key.sample - self.sample_start,
+            key.forecast_step - self.forecast_steps[0],  # as in ModelOutput.chunk_idx()
+            key.stream,
         )
 
     def _extract_targets_predictions(self, stream_idx, offset_key, key, source_interval):
