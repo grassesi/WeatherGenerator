@@ -582,6 +582,7 @@ class OutputBatchData:
 
     sample_start: int
     forecast_offset: int
+    forecast_steps: list[int]
 
     @functools.cached_property
     def samples(self):
@@ -589,13 +590,6 @@ class OutputBatchData:
 
         # TODO associate samples with the sampel idx used for the time window
         return np.arange(len(self.sources)) + self.sample_start
-
-    @functools.cached_property
-    def forecast_steps(self):
-        """Indices of all forecast steps adjusted by the forecast offset"""
-        # forecast offset should be either 1 for forecasting or 0 for MTM
-        assert self.forecast_offset in (0, 1)
-        return np.arange(len(self.targets) + self.forecast_offset)
 
     def items(self) -> typing.Generator[OutputItem, None, None]:
         """Iterate over possible output items"""
