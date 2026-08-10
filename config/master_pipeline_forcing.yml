@@ -6,10 +6,11 @@ stages:
    from_run_id: xnd28me5
    config_files:
     - config/master_ocean_finetuning.yml
+    - config/ocean_finetuning_overwrite.yml
    options:
     - ffe_num_blocks=2
     - streams.ERA5.is_dynamic_forcing=True
-    - wgtags.grid=master-coupling-forcing-ft-01
+    - wgtags.grid=master-coupling-forcing-ft-01a
     - wgtags.exp=atmosurface+sst-sst
 
  - name: rad+atmosurface+sst-sst-forcing-ft
@@ -17,11 +18,12 @@ stages:
    from_run_id: rz3aq45a
    config_files:
     - config/master_ocean_finetuning.yml
+    - config/ocean_finetuning_overwrite.yml
    options:
     - ffe_num_blocks=2
     - streams.ERA5.is_dynamic_forcing=True
     - streams.ERA5-radiation.is_dynamic_forcing=True
-    - wgtags.grid=master-coupling-forcing-ft-01
+    - wgtags.grid=master-coupling-forcing-ft-01a
     - wgtags.exp=rad+atmosurface+sst-sst
 # finetuning atmo
  - name: sst+atmo-atmo_forcing-ft
@@ -33,17 +35,16 @@ stages:
    # is ERA5 also needed? inject insolation geoinfo -> goes to decoder -> frozen :|
     - ffe_num_blocks=2
     - streams.ERA5-Ocean.is_dynamic_forcing=True
-    - wgtags.grid=master-coupling-forcing-ft-01
+    - wgtags.grid=master-coupling-forcing-ft-01a
     - wgtags.exp=sst+atmo-atmo_ft
 
  - name: sst+atmo-atmo+rad_forcing-ft
    stage: train
    from_run_id: aejy29gs
-   chain_jobs: 3
    config_files:
     - config/master_ocean_finetuning.yml
    options:
     - ffe_num_blocks=2
     - streams.ERA5-Ocean.is_dynamic_forcing=True
-    - wgtags.grid=master-coupling-forcing-ft-01
+    - wgtags.grid=master-coupling-forcing-ft-01a
     - wgtags.exp=sst+atmo-atmo+rad_ft

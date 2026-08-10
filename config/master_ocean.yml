@@ -200,6 +200,7 @@ validation_config:
   samples_per_mini_epoch: 256
   shuffle: False
 
+  # confirm: enough samples for validation!
   start_date: 2022-01-01T00:00
   end_date: 2022-12-31T00:00
   

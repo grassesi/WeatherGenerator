@@ -3,27 +3,31 @@ stages:
  - name: sst-sst
    stage: train
    from_run_id: kesjm27i
-   chain_jobs: 3
    config_files:
     - config/master_ocean_finetuning.yml
+    - config/ocean_finetuning_overwrite.yml
    options:
     - wgtags.exp=sst-sst_ft
+    - wgtags.grid=master-coupling-forcing-ft-01a
+
  - name: atmosurface-sst_ft
    stage: train
    from_run_id: xnd28me5
-   chain_jobs: 3
    config_files:
     - config/master_ocean_finetuning.yml
+    - config/ocean_finetuning_overwrite.yml
    options:
     - wgtags.exp=atmosurface-sst_ft
+    - wgtags.grid=master-coupling-forcing-ft-01a
 
  - name: rad+atmosurface+sst_ft
    stage: train
    from_run_id: rz3aq45a
-   chain_jobs: 3
    config_files:
     - config/master_ocean_finetuning.yml
+    - config/ocean_finetuning_overwrite.yml
    options:
     - wgtags.exp=rad+atmosurface+sst_ft
+    - wgtags.grid=master-coupling-forcing-ft-01a
   
 # reduce n_forecast steps (other models train for eg. 1 step @ 96h), cannot train for 16 steps @ 96h (beyond forecast horizon) => 2 steps @ 24 + 8 steps @ 24
