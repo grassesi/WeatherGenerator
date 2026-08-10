@@ -35,7 +35,7 @@ stages:
     channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
     stream: ERA5
     type: [target, prediction]
-    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_atmo-atmo_ft
   - name: export_sst+atmo-atmo_ft
     stage: export
@@ -43,7 +43,7 @@ stages:
     channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
     stream: ERA5
     type: [target, prediction]
-    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_sst+atmo-atmo_ft
   - name: export_sst+atmo-atmo_ft-forcing
     stage: export
@@ -52,7 +52,7 @@ stages:
     channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
     stream: ERA5
     type: [target, prediction]
-    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_sst+atmo-atmo_ft-forcing
   - name: export_sst+atmo-atmo+rad_ft
     stage: export
@@ -60,7 +60,7 @@ stages:
     channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
     stream: ERA5
     type: [target, prediction]
-    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_sst+atmo-atmo+rad_ft
   - name: export_sst+atmo-atmo+rad_ft-forcing
     stage: export
@@ -68,5 +68,5 @@ stages:
     channels: [z_500, t_850, z_850, 10u, 10v, 2t, q_850]
     stream: ERA5
     type: [target, prediction]
-    outpu-dir="/capstor/scratch/cscs/sgrasse/export_data"
+    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_sst+atmo-atmo+rad_ft-forcing

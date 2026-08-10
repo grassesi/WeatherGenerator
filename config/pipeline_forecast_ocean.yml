@@ -32,25 +32,25 @@ stages:
   - name: export_sst-sst_ft
     stage: export
     format: "netcdf"
-    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
+    output-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_sst-sst_ft
   - name: export_atmosurface-sst_ft
     stage: export
     format: "netcdf"
-    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
+    output-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_atmosurface-sst_ft
   - name: export_atmosurface-sst_ft-forcing
     stage: export
     format: "netcdf"
-    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
+    output-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_atmosurface-sst_ft-forcing
   - name: export_rad+atmosurface-sst_ft
     stage: export
     format: "netcdf"
-    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
+    output-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_rad+atmosurface-sst_ft
   - name: export_rad+atmosurface-sst_ft-forcing
     stage: export
     format: "netcdf"
-    outpu-dir: "/capstor/scratch/cscs/sgrasse/export_data"
+    output-dir: "/capstor/scratch/cscs/sgrasse/export_data"
     from_run_id: STAGE.infer_rad+atmosurface-sst_ft-forcing

@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*ERA5-Ocean.*|.*ERA5-radiation.*"
+# TODO freeze only encoder no decoders
 
 general:
   # mutable parameters
@@ -32,6 +33,6 @@ training_config:
 
   forecast :
     offset: 1
-    num_steps: 16 # originally 16 TODO: check for OOM reduce to 12, target 4 days => adjust for longer steps 8 ~0.095 s/sec 12 OOM 10 ~ 0.076
+    num_steps: 16 # TODO reduce finetuning to 8 steps to prevent smoothing due to double penalty.
     policy: "fixed"
 

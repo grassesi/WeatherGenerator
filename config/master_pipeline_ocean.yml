@@ -28,7 +28,7 @@ stages:
  - name: rad+atmosurface-sst
    stage: train
    chain_jobs: 3
-   base_config: config/master_ocean_overwrite.yml
+   base_config: config/master_ocean.yml
    config_files:
     - config/ocean_overwrite.yml
    options:

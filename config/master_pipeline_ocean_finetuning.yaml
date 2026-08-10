@@ -25,3 +25,5 @@ stages:
     - config/master_ocean_finetuning.yml
    options:
     - wgtags.exp=rad+atmosurface+sst_ft
+  
+# reduce n_forecast steps (other models train for eg. 1 step @ 96h), cannot train for 16 steps @ 96h (beyond forecast horizon) => 2 steps @ 24 + 8 steps @ 24

@@ -1,4 +1,5 @@
 parallelize: True 
+stages:
  - name: atmo-atmo_ft
    stage: train
    from_run_id: js6ffvw0
