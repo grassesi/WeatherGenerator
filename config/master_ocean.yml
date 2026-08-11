@@ -190,7 +190,7 @@ training_config:
   forecast :
       time_step: 06:00:00
       offset: 1
-      num_steps: 4 # TODO reduce to 2 (has been shown successful in other configs.)
+      num_steps: 2 # reduced to 2 (has been shown successful in other configs.)
       policy: "fixed"
 
 

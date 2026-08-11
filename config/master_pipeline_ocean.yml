@@ -11,7 +11,7 @@ stages:
     - streams_directory=./config/streams/ocean_master_only_sst/
     - ae_local_num_blocks=0 # disable local assimilation for just sst
     - streams.ERA5-Ocean.source=["sst"]
-    - wgtags.grid=master-coupling-ocean-01
+    - wgtags.grid=master-coupling-ocean-02
     - wgtags.exp=sst-sst
 
  - name: atmosurface-sst
@@ -22,7 +22,7 @@ stages:
     - config/ocean_overwrite.yml
    options:
     - streams_directory=./config/streams/ocean_master/
-    - wgtags.grid=master-coupling-ocean-01
+    - wgtags.grid=master-coupling-ocean-02
     - wgtags.exp=atmosurface-sst
 
  - name: rad+atmosurface-sst
@@ -32,6 +32,6 @@ stages:
    config_files:
     - config/ocean_overwrite.yml
    options:
-    - streams_directory=./config/streams/ocean_master_rad/
-    - wgtags.grid=master-coupling-ocean-01
+    - streams_directory=./config/streams/ocean_master_rad_ssrd/
+    - wgtags.grid=master-coupling-ocean-02
     - wgtags.exp=rad+atmosurface-sst

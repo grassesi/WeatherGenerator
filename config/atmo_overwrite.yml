@@ -10,5 +10,12 @@ streams:
     frequency: "06:00:00" # (4x6h) => 24h original resolution
   ERA5-radiation:
     source: [] # TODO: make it prognostic?? is global insolation in geoinfo enough?, not fed in during rollout?
-    target: ["avg_sdlwrf", "avg_sdswrf"]
+    # ssrd/strd/ttr from the s2s-predictors store (streams/ocean_master_rad_ssrd), replacing
+    # avg_sdlwrf/avg_sdswrf: the standalone radiation zarr is all-NaN from 2021-12-31T18 on,
+    # so the +rad arm had no validation or test coverage. These are 6h accumulations in J/m^2
+    # over [t-6h, t], not 1h mean rates in W/m^2 -- a different quantity, so this arm is not
+    # comparable with any earlier +rad checkpoint.
+    # Kept identical to the ocean stream's source list so the coupled rollout has no
+    # missing channel (atmo predicts exactly what the ocean model ingests).
+    target: ["ssrd", "strd", "ttr"]
     frequency: "06:00:00"

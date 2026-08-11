@@ -10,7 +10,7 @@ stages:
    options:
     - streams_directory=./config/streams/ocean_master_only_era5/
     - ae_local_num_blocks=0 # disable local assimilation for just ERA5
-    - wgtags.grid=master-coupling-atmo-01
+    - wgtags.grid=master-coupling-atmo-02
     - wgtags.exp=atmo-atmo_pre
 
  - name: sst+atmo-atmo
@@ -21,7 +21,7 @@ stages:
     - config/atmo_overwrite.yml
    options:
     - streams_directory=./config/streams/ocean_master/
-    - wgtags.grid=master-coupling-atmo-01
+    - wgtags.grid=master-coupling-atmo-02
     - wgtags.exp=sst+atmo-atmo_pre
 
  - name: sst+atmo-atmo+rad
@@ -31,6 +31,6 @@ stages:
    config_files:
     - config/atmo_overwrite.yml
    options:
-    - streams_directory=./config/streams/ocean_master_rad/
-    - wgtags.grid=master-coupling-atmo-01
+    - streams_directory=./config/streams/ocean_master_rad_ssrd/
+    - wgtags.grid=master-coupling-atmo-02
     - wgtags.exp=sst+atmo-atmo+rad_pre
