@@ -286,9 +286,9 @@ class Trainer(TrainerBase):
         )
         self.dataset_val = self.dataset
         forcing_streams = {
-            stream: datasets
-            for stream, datasets in self.dataset.streams_datasets.items()
-            if datasets.info.get("is_dynamic_forcing", False)
+            name: stream.readers
+            for name, stream in self.dataset.streams_datasets.items()
+            if stream.info.get("is_dynamic_forcing", False)
         }
         self.dynamic_forcings = ForcingInput(
             self.dataset.time_window_handler, forcing_streams, self.dataset_val.tokenizer
@@ -525,9 +525,9 @@ class Trainer(TrainerBase):
         self.optimizer.zero_grad()
 
         forcing_streams = {
-            stream: datasets
-            for stream, datasets in self.dataset.streams_datasets.items()
-            if datasets.info.get("is_dynamic_forcing", False)
+            name: stream.readers
+            for name, stream in self.dataset.streams_datasets.items()
+            if stream.info.get("is_dynamic_forcing", False)
         }
         self.dynamic_forcings = ForcingInput(
             self.dataset.time_window_handler, forcing_streams, self.dataset.tokenizer

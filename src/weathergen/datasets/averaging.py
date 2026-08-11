@@ -73,7 +73,9 @@ class AveragingReader(DataReaderTimestep):
                 ], axis=1
             ),
             columns=["lat", "lon", *self.averaging_geoinfos, *channels_idx]
-        ).groupby(["lat", "lon"]).mean()
+        # groupby() implicitly sorts, unaligning data and coordinates: the coords,
+        # geoinfos and datetimes below are taken unsorted via max_time_idx.
+        ).groupby(["lat", "lon"], sort=False).mean()
         
         return ReaderData(
             coords=rdata.coords[max_time_idx, :].squeeze(),
