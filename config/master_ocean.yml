@@ -231,6 +231,8 @@ test_config:
   init_freq: "half"
   output :
     num_samples: 1
+    chunk_size: 120 # ~1 month @ 6h
+    accumulate_chunks: False
   forecast: {num_steps: 500} # 125 days j~1/2 year
 
 wgtags:

@@ -212,6 +212,7 @@ class Trainer(TrainerBase):
 
         num_samples_write = mode_cfg.get("output", {}).get("num_samples", 0) * batch_size
         should_write_output = bidx < num_samples_write
+        should_accumulate_chunks = forecast_cfg.get("accumulate_chunks", True)
         if should_write_output:
             denormalize_data_fct = (
                 (lambda x0, x1: x1)
@@ -255,18 +256,20 @@ class Trainer(TrainerBase):
                     targets_and_auxs,
                 )
 
-            physical += forecast_chunk.physical
-            latent += forecast_chunk.latent
+            if should_accumulate_chunks:
+                physical += forecast_chunk.physical
+                latent += forecast_chunk.latent
 
-        # Data for validation purposes => accumulates in memory!?
-        preds_full = ModelOutput(output_idxs, output_idxs[0], batch.get_source_samples())
-        assert len(physical) == len(preds_full.physical), (
-            f"Chunks cover {len(physical)} forecast steps, expected {len(preds_full.physical)}."
-        )
-        preds_full.physical = physical
-        preds_full.latent = latent
+        if should_accumulate_chunks:
+            # Data for validation purposes => accumulates in memory!?
+            preds_full = ModelOutput(output_idxs, output_idxs[0], batch.get_source_samples())
+            assert len(physical) == len(preds_full.physical), (
+                f"Chunks cover {len(physical)} forecast steps, expected {len(preds_full.physical)}."
+            )
+            preds_full.physical = physical
+            preds_full.latent = latent
 
-        return preds_full
+            return preds_full
 
     def inference(self, cf, devices, run_id_contd, mini_epoch_contd):
         # general initalization
@@ -706,11 +709,12 @@ class Trainer(TrainerBase):
                             targets_and_auxs,
                         )
 
-                    _ = self.loss_calculator_val.compute_loss(
-                        preds=preds,
-                        targets_and_aux=targets_and_auxs,
-                        metadata=extract_batch_metadata(batch),
-                    )
+                    if preds is not None:
+                        _ = self.loss_calculator_val.compute_loss(
+                            preds=preds,
+                            targets_and_aux=targets_and_auxs,
+                            metadata=extract_batch_metadata(batch),
+                        )
 
                     pbar.update(batch_size)
 
