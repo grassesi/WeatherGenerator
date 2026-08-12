@@ -142,6 +142,7 @@ class BatchSamples:
     """
 
     samples: list[Sample]
+    streams: list[str]
     tokens_lens: torch.Tensor | None
     output_steps: int
     output_idxs: list[int]
@@ -151,6 +152,7 @@ class BatchSamples:
         self, stream_names: list[str], num_samples: int, output_steps, output_idxs
     ) -> None:
         self.samples = [Sample(stream_names) for _ in range(num_samples)]
+        self.streams = list(stream_names)
         self.tokens_lens = None
         self.output_steps = output_steps
         self.output_idxs = output_idxs

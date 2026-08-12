@@ -18,6 +18,7 @@ from omegaconf import OmegaConf
 
 from weathergen.common.config import Config
 from weathergen.common.io import IOReaderData
+from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
 from weathergen.datasets.data_reader_base import (
@@ -25,7 +26,6 @@ from weathergen.datasets.data_reader_base import (
     TimeWindowHandler,
     TIndex,
 )
-from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
 from weathergen.datasets.data_reader_obs import DataReaderObs
 from weathergen.datasets.masking import Masker
@@ -642,12 +642,11 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         """
         Perform necessary pre-processing of model batch
         """
-        stream_names = list(self.streams_datasets.keys())
         batch.source_samples.tokens_lens = get_tokens_lens(
-            stream_names, batch.source_samples, source_input_steps
+            batch.source_samples.streams, batch.source_samples, source_input_steps
         )
         batch.target_samples.tokens_lens = get_tokens_lens(
-            stream_names, batch.target_samples, target_input_steps
+            batch.target_samples.streams, batch.target_samples, target_input_steps
         )
 
         return batch

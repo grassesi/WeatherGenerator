@@ -1,9 +1,9 @@
 # ruff: noqa: T201
 
 from __future__ import annotations
-from typing import Any
 
 import itertools as it
+from typing import Any
 
 import torch
 from torch.utils.checkpoint import checkpoint
@@ -128,10 +128,12 @@ class ForcedModel(Model):
 class ForcingInput:
     def __init__(
         self,
+        stage: str,
         time_window_handler: TimeWindowHandler,
         forcing_streams: dict[str, list[DataReaderBase]],
         tokenizer: TokenizerMasking,
     ):
+        self.stage = stage
         self.forcing_window_len = 1
         self.forcing_streams = forcing_streams
         self.healpix_lvl = 5  # TODO infer from MSDS
@@ -163,9 +165,8 @@ class ForcingInput:
             f"got {len(sampling_idxs)} indices for {len(meta_infos)} samples."
         )
 
-        forcing_stream_infos = [readers[0].stream_info for readers in self.forcing_streams.values()]
         forcing_samples = BatchSamples(
-            stream_names=forcing_stream_infos,
+            stream_names=list(self.forcing_streams.keys()),
             num_samples=len(samples),
             output_steps=1,
             output_idxs=None,  # not needed, since not used in encoder
@@ -181,7 +182,7 @@ class ForcingInput:
             forcing_samples.samples[sample].add_meta_info(stream, meta_info)
 
         forcing_samples.tokens_lens = get_tokens_lens(
-            forcing_stream_infos, forcing_samples, self.forcing_window_len
+            forcing_samples.streams, forcing_samples, self.forcing_window_len
         )
 
         return forcing_samples
@@ -227,7 +228,9 @@ class ForcingInput:
                 input_mask,
             )
 
-            stream_data.add_source(step, rdata, source_cells_lens, source_cells)
+            stream_data.add_source(
+                self.stage, step, rdata, source_cells_lens, source_cells, rdata.is_spoof
+            )
 
         return stream_data
 

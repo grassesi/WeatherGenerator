@@ -87,9 +87,13 @@ class EmbeddingEngine(torch.nn.Module):
             (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
         )
 
-        # iterate over all streams
+        # Ensure embedding networks are present for all streams in this batch
+        assert set(batch.streams) <= set(self.streams.keys()), (
+            f"batch carries streams without an embedding net: "
+            f"{sorted(set(batch.streams) - set(self.streams.keys()))}"
+        )
         x_embeds = []
-        for stream_name in self.streams.keys():
+        for stream_name in batch.streams:
             # collect all source tokens from all input_steps and all samples in the batch
             sdata = []
             for istep in range(num_steps_input):
