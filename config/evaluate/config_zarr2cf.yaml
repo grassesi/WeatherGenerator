@@ -103,6 +103,32 @@ variables:
     wg_unit: K
     std_unit: K
     level_type: sfc
+  # Radiation as carried by the s2s-predictors zarr from generation 02 on: 6h *accumulations*
+  # (J m-2), not the 1h mean rates (W m-2) of the earlier ERA5-radiation stream. The standard
+  # names are therefore the integral_wrt_time_of_* forms; do not swap in the plain flux names.
+  ssrd:
+    var: ssrd
+    long: surface_solar_radiation_downwards
+    std: integral_wrt_time_of_surface_downwelling_shortwave_flux_in_air
+    wg_unit: J m-2
+    std_unit: J m-2
+    level_type: sfc
+  strd:
+    var: strd
+    long: surface_thermal_radiation_downwards
+    std: integral_wrt_time_of_surface_downwelling_longwave_flux_in_air
+    wg_unit: J m-2
+    std_unit: J m-2
+    level_type: sfc
+  # ERA5 top *net* thermal radiation: negative, since the net flux at the top of the
+  # atmosphere is upward.
+  ttr:
+    var: ttr
+    long: top_net_thermal_radiation
+    std: integral_wrt_time_of_toa_outgoing_longwave_flux
+    wg_unit: J m-2
+    std_unit: J m-2
+    level_type: sfc
    
   
 
