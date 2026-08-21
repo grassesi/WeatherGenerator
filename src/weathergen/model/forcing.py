@@ -276,6 +276,19 @@ class ForcingEngine(torch.nn.Module):
 
         self.blocks = torch.nn.ModuleList(blocks)
 
+        # The blocks are residual and write into the pretrained latent at every rollout step,
+        # so they have to start as a near-identity: with the default Linear init the freshly
+        # built engine perturbs the latent enough to diverge a finetuning run once the LR
+        # warmup peaks. Same treatment ForecastEngine gives its blocks in engines.py.
+        def init_weights_final(m):
+            if isinstance(m, torch.nn.Linear):
+                torch.nn.init.normal_(m.weight, mean=0, std=0.001)
+                if m.bias is not None:
+                    torch.nn.init.normal_(m.bias, mean=0, std=0.001)
+
+        for block in self.blocks:
+            block.apply(init_weights_final)
+
     def get_block(self) -> list[torch.Module]:
         return [  # CrossAttention block, similiar to PerceiverIO
             MultiCrossAttentionHeadVarlen(
