@@ -113,9 +113,12 @@ def init_model_and_shard(
                 # Needed for pushforward trick.
                 fully_shard(module, reshard_after_forward=False, **fsdp_kwargs)
 
-        for module in model.forcing_engine.blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+        # forcing_engine is None whenever ffe_num_blocks == 0, i.e. for every non-forcing
+        # model; only forcing runs have blocks to shard here.
+        if model.forcing_engine is not None:
+            for module in model.forcing_engine.blocks.modules():
+                if isinstance(module, modules_to_shard):
+                    fully_shard(module, **fsdp_kwargs)
 
         for module in model.latent_heads.modules():
             if isinstance(module, modules_to_shard):

@@ -2,7 +2,8 @@ parallelize: True
 stages:
  - name: atmo-atmo_ft
    stage: train
-   from_run_id: js6ffvw0
+   chain_jobs: 3
+   from_run_id: m91ehu6z
    config_files:
     - config/master_ocean_finetuning.yml
    options:
@@ -10,7 +11,8 @@ stages:
 
  - name: sst+atmo-atmo_ft
    stage: train
-   from_run_id: sso03cvj
+   chain_jobs: 3
+   from_run_id: g2xxepr3
    config_files:
     - config/master_ocean_finetuning.yml
    options:
@@ -18,7 +20,8 @@ stages:
 
  - name: sst+atmo-atmo+rad_ft
    stage: train
-   from_run_id: aejy29gs
+   chain_jobs: 3
+   from_run_id: qws8i6pi
    config_files:
     - config/master_ocean_finetuning.yml
    options:

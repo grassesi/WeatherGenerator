@@ -198,13 +198,13 @@ def format_cf(config: Config) -> str:
     return stream.getvalue()
 
 
-def save(config: Config, mini_epoch: int | None):
+def save(config: Config, mini_epoch: int | None, name: str | None=None):
     """Save current config into the current runs model directory."""
     # save in directory with model files
     dirname = get_path_model(config)
     dirname.mkdir(exist_ok=True, parents=True)
 
-    fname = _get_model_config_file_write_name(get_run_id_from_config(config), mini_epoch)
+    fname = _get_model_config_file_write_name(get_run_id_from_config(config), mini_epoch, name=name)
 
     json_str = json.dumps(OmegaConf.to_container(_strip_interpolation(config)))
     with (dirname / fname).open("w") as f:
@@ -263,7 +263,7 @@ def load_run_config(run_id: str, mini_epoch: int | None, model_path: str | None)
     return _apply_fixes(config)
 
 
-def _get_model_config_file_write_name(run_id: str, mini_epoch: int | None):
+def _get_model_config_file_write_name(run_id: str, mini_epoch: int | None, name: str | None = None):
     """Generate the filename for writing a model config file."""
     if mini_epoch is None:
         mini_epoch_str = ""
@@ -271,8 +271,10 @@ def _get_model_config_file_write_name(run_id: str, mini_epoch: int | None):
         mini_epoch_str = "_latest"
     else:
         mini_epoch_str = f"_chkpt{mini_epoch:05d}"
+    
+    name_str = f"_{name}" if name else ""
 
-    return f"model_{run_id}{mini_epoch_str}.json"
+    return f"model_{run_id}{mini_epoch_str}{name_str}.json"
 
 
 def _get_model_config_file_read_name(run_id: str, mini_epoch: int | None):

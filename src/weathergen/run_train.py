@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 import weathergen.common.config as config
-from weathergen.common.coupling import Coupling
+from weathergen.common.coupling import Couplings
 import weathergen.utils.cli as cli
 from weathergen.common.logger import init_loggers
 from weathergen.train.trainer import Trainer
@@ -61,8 +61,6 @@ def main(argl: list[str]):
             argl[0] = cli.Stage.coupled_inference
         
         args = parser.parse_args(argl)
-
-    args = parser.parse_args(argl)
 
     match args.stage:
         case cli.Stage.train:
@@ -134,9 +132,17 @@ def run_inference(args):
 
 
 def run_coupled_inference(args):
-    coupling = Coupling.from_args(args.components)
-    print(coupling)
-    exit()
+    couplings = Couplings.from_args(args.couplings, args.components)
+    print(couplings)
+
+    try:
+        global_cf = couplings.global_intialization(args.run_id)
+        couplings.run(args.private_config, global_cf)
+    except Exception:
+        extype, value, tb = sys.exc_info()
+        traceback.print_exc()
+        if global_cf.world_size == 1:
+            pdb.post_mortem(tb)
 
 
 def run_continue(args):

@@ -9,8 +9,10 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 import copy
+import dataclasses
 import logging
 import time
+from collections.abc import Callable
 from math import sqrt
 
 import numpy as np
@@ -54,6 +56,23 @@ from weathergen.utils.utils import get_dtype
 from weathergen.utils.validation_io import write_output
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class ChunkPlan:
+    """How one batch's rollout is split into chunks, and what to do with each chunk.
+
+    Produced by Trainer.prepare_chunks and consumed by whoever drives the rollout loop -
+    Trainer itself for a single model, or the Coupler when several models are interleaved.
+    """
+
+    output_idxs: list[int]
+    chunks: list[list[int]]
+    should_write_output: bool
+    should_accumulate_chunks: bool
+    # None unless should_write_output; maps (stream_name, data) to physical units
+    denormalize_data_fct: Callable | None
+
 
 # cfg_keys_to_filter = ["losses", "model_input", "target_input"]
 
@@ -194,16 +213,12 @@ class Trainer(TrainerBase):
             for start in range(0, len(output_idxs), chunk_size)
         ]
 
-    def _process_validation_chunks(
-        self,
-        batch,
-        mode_cfg,
-        batch_size,
-        mini_epoch,
-        bidx,
-        targets_and_auxs,
-    ) -> ModelOutput:
-        """Run the rollout in chunks and assemble the predictions for the whole batch."""
+    def prepare_chunks(self, batch, mode_cfg, batch_size, bidx, targets_and_auxs) -> ChunkPlan:
+        """Decide how this batch's rollout is chunked and what to do with each chunk.
+
+        Split out of the rollout loop so that an external driver can own the loop and
+        interleave the chunks of several models (see weathergen.common.coupling.Coupler).
+        """
         forecast_cfg = mode_cfg.get("forecast", {})
 
         output_idxs = batch.get_output_idxs()
@@ -213,6 +228,7 @@ class Trainer(TrainerBase):
         num_samples_write = mode_cfg.get("output", {}).get("num_samples", 0) * batch_size
         should_write_output = bidx < num_samples_write
         should_accumulate_chunks = forecast_cfg.get("accumulate_chunks", True)
+        denormalize_data_fct = None
         if should_write_output:
             denormalize_data_fct = (
                 (lambda x0, x1: x1)
@@ -225,54 +241,125 @@ class Trainer(TrainerBase):
                     "Configure validation losses or set output.num_samples=0."
                 )
 
+        return ChunkPlan(
+            output_idxs=output_idxs,
+            chunks=chunks,
+            should_write_output=should_write_output,
+            should_accumulate_chunks=should_accumulate_chunks,
+            denormalize_data_fct=denormalize_data_fct,
+        )
+
+    def step_chunk(self, forecast_chunk, chunk) -> ModelOutput:
+        """Advance the rollout by one chunk of forecast steps.
+
+        The returned ModelOutput is the whole state of the rollout: feeding it back in as
+        `forecast_chunk` continues where this chunk left off, so a driver can hold one per
+        model and interleave them.
+        """
+        if self.ema_model is None:
+            return self.model(
+                self.model_params,
+                forecast_chunk,
+                chunk,
+                self.dynamic_forcings,
+            )
+
+        return self.ema_model.forward_eval(
+            self.model_params,
+            forecast_chunk,
+            chunk,
+            self.dynamic_forcings,
+        )
+
+    def write_chunk_output(
+        self,
+        plan: ChunkPlan,
+        mode_cfg,
+        batch_size,
+        mini_epoch,
+        bidx,
+        batch,
+        forecast_chunk,
+        targets_and_auxs,
+    ) -> None:
+        """Write one chunk of predictions, using this model's own config and streams."""
+        write_output(
+            self.cf,
+            mode_cfg,
+            batch_size,
+            mini_epoch,
+            bidx,
+            plan.denormalize_data_fct,
+            batch,
+            forecast_chunk,
+            targets_and_auxs,
+        )
+
+    def assemble_chunks(self, plan: ChunkPlan, physical, latent, batch) -> ModelOutput:
+        """Reassemble the per-chunk predictions into one globally indexed ModelOutput."""
+        # Data for validation purposes => accumulates in memory!?
+        preds_full = ModelOutput(plan.output_idxs, plan.output_idxs[0], batch.get_source_samples())
+        assert len(physical) == len(preds_full.physical), (
+            f"Chunks cover {len(physical)} forecast steps, expected {len(preds_full.physical)}."
+        )
+        preds_full.physical = physical
+        preds_full.latent = latent
+
+        return preds_full
+
+    def _process_validation_chunks(
+        self,
+        batch,
+        mode_cfg,
+        batch_size,
+        mini_epoch,
+        bidx,
+        targets_and_auxs,
+    ) -> ModelOutput | None:
+        """Run the rollout in chunks and assemble the predictions for the whole batch."""
+        plan = self.prepare_chunks(batch, mode_cfg, batch_size, bidx, targets_and_auxs)
+
         physical, latent = [], []
         forecast_chunk = batch.get_source_samples()
-        for chunk in chunks:
-            if self.ema_model is None:
-                forecast_chunk = self.model(
-                    self.model_params,
-                    forecast_chunk,
-                    chunk,
-                    self.dynamic_forcings
-                )
-            else:
-                forecast_chunk = self.ema_model.forward_eval(
-                    self.model_params,
-                    forecast_chunk,
-                    chunk,
-                    self.dynamic_forcings
-                )
+        for chunk in plan.chunks:
+            forecast_chunk = self.step_chunk(forecast_chunk, chunk)
 
-            if should_write_output:
-                write_output(
-                    self.cf,
+            if plan.should_write_output:
+                self.write_chunk_output(
+                    plan,
                     mode_cfg,
                     batch_size,
                     mini_epoch,
                     bidx,
-                    denormalize_data_fct,
                     batch,
                     forecast_chunk,
                     targets_and_auxs,
                 )
 
-            if should_accumulate_chunks:
+            if plan.should_accumulate_chunks:
                 physical += forecast_chunk.physical
                 latent += forecast_chunk.latent
 
-        if should_accumulate_chunks:
-            # Data for validation purposes => accumulates in memory!?
-            preds_full = ModelOutput(output_idxs, output_idxs[0], batch.get_source_samples())
-            assert len(physical) == len(preds_full.physical), (
-                f"Chunks cover {len(physical)} forecast steps, expected {len(preds_full.physical)}."
-            )
-            preds_full.physical = physical
-            preds_full.latent = latent
+        if not plan.should_accumulate_chunks:
+            return None
 
-            return preds_full
+        return self.assemble_chunks(plan, physical, latent, batch)
 
-    def inference(self, cf, devices, run_id_contd, mini_epoch_contd):
-        # general initalization
+    def inference(self, cf, devices, run_id_contd, mini_epoch_contd, name=None):    
+        self.setup_inference(cf, devices, run_id_contd, mini_epoch_contd, name)
+        logger.info(f"Starting inference with id={self.cf.general.run_id}.")
+        self.validate(0, self.test_cfg, self.batch_size_test_per_gpu)
+        logger.info(f"Finished inference run with id: {self.cf.general.run_id}")
+    
+    # general initalization
+    def setup_inference(
+        self,
+        cf,
+        devices: str,
+        run_id_contd: str,
+        mini_epoch_contd: int,
+        name: str | None = None,
+    ):
         self.init(cf, devices)
 
         cf = self.cf
@@ -328,13 +415,8 @@ class Trainer(TrainerBase):
         self.loss_calculator_val = LossCalculator(cf, self.test_cfg, VAL, device=self.devices[0])
 
         if is_root():
-            config.save(self.cf, mini_epoch=0)
-
-        logger.info(f"Starting inference with id={self.cf.general.run_id}.")
-
-        # inference validation set
-        self.validate(0, self.test_cfg, self.batch_size_test_per_gpu)
-        logger.info(f"Finished inference run with id: {cf.general.run_id}")
+            config.save(self.cf, mini_epoch=0, name=name)
+    
 
     def run(self, cf, devices, run_id_contd=None, mini_epoch_contd=None):
         # general initalization
@@ -721,8 +803,16 @@ class Trainer(TrainerBase):
                     if (bidx * batch_size) > mode_cfg.samples_per_mini_epoch:
                         break
 
-                self._log_terminal(0, mini_epoch, VAL)
-                self._log(VAL)
+        self.finish_validation(mini_epoch)
+
+    def finish_validation(self, mini_epoch: int) -> None:
+        """Log this model's accumulated validation metrics and advance its sampler.
+
+        Split out so a driver interleaving several models can call it per component,
+        in a fixed order - the loggers issue DDP collectives.
+        """
+        self._log_terminal(0, mini_epoch, VAL)
+        self._log(VAL)
 
         # avoid that there is a systematic bias in the validation subset
         self.dataset_val.advance()
