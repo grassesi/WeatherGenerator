@@ -48,21 +48,19 @@ def main(argl: list[str]):
         argl = _fix_argl(argl)
     except ValueError as e:
         logger.error(str(e))
-    
+
     parser = cli.get_main_parser()
     try:
         args = parser.parse_args(argl)
-    except Exception: # catch parser error
+    except Exception:  # catch parser error
         if argl[0] == cli.Stage.inference:
             logger.info(
                 "Failed first attempt at parsing inference args. \
                 Trying to parse args for coupled inference."
             )
             argl[0] = cli.Stage.coupled_inference
-        
-        args = parser.parse_args(argl)
 
-    args = parser.parse_args(argl)
+        args = parser.parse_args(argl)
 
     match args.stage:
         case cli.Stage.train:
@@ -72,7 +70,7 @@ def main(argl: list[str]):
         case cli.Stage.inference:
             run_inference(args)
         case cli.Stage.coupled_inference:
-            run_coupled_inference(args) 
+            run_coupled_inference(args)
         case _:
             logger.error("No stage was found.")
 
@@ -90,7 +88,7 @@ def _fix_argl(argl):  # TODO remove this fix after grace period
             raise ValueError(msg) from e
 
         argl = [stage] + argl
-    
+
     return argl
 
 
@@ -134,9 +132,17 @@ def run_inference(args):
 
 
 def run_coupled_inference(args):
-    coupling = Coupling.from_args(args.components)
-    print(coupling)
-    exit()
+    couplings = Couplings.from_args(args.couplings, args.components)
+    print(couplings)
+
+    try:
+        global_cf = couplings.global_intialization(args.run_id)
+        couplings.run(args.private_config, global_cf)
+    except Exception:
+        extype, value, tb = sys.exc_info()
+        traceback.print_exc()
+        if global_cf.world_size == 1:
+            pdb.post_mortem(tb)
 
 
 def run_continue(args):
