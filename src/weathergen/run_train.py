@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 import weathergen.common.config as config
-from weathergen.common.coupling import Coupling
+from weathergen.common.coupling import Couplings
 import weathergen.utils.cli as cli
 from weathergen.common.logger import init_loggers
 from weathergen.train.trainer import Trainer

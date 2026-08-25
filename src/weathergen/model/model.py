@@ -608,22 +608,22 @@ class Model(torch.nn.Module):
 
     def print_num_parameters(self) -> None:
         """Print number of parameters for entire model and each module used to build the model"""
-        
+
         num_params = self._gather_parameters()
 
         print("-----------------")
         self._print_components(num_params)
         zps = zip(
             self.streams.keys(),
-            num_params['embed_tcs'],
-            num_params['tte'],
-            num_params['preds'],
+            num_params["embed_tcs"],
+            num_params["tte"],
+            num_params["preds"],
             strict=False,
         )
         for stream_name, np0, np1, np2 in zps:
             print(f"   {stream_name} : {np0:,} / {np1:,} / {np2:,}")
         print("-----------------")
-    
+
     def _print_components(self, num_params):
         print(f"Total number of trainable parameters: {num_params['total']:,}")
         print("Number of parameters:")

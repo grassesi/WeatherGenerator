@@ -198,7 +198,7 @@ class ItemKey:
     sample: int
     forecast_step: int
     stream: str
-    
+
     def __post_init__(self):
         self.sample = int(self.sample)
         self.forecast_step = int(self.forecast_step)
@@ -490,7 +490,7 @@ class ZarrIO:
         if self.example_key.forecast_step != 0:
             return self.example_key.forecast_step
 
-        fstep0_datasets = self._get_datasets(self.example_key)        
+        fstep0_datasets = self._get_datasets(self.example_key)
         return ItemKey._infer_forecast_offset(fstep0_datasets)
 
     @functools.cached_property

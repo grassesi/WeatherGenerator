@@ -230,17 +230,11 @@ class Trainer(TrainerBase):
         for chunk in chunks:
             if self.ema_model is None:
                 forecast_chunk = self.model(
-                    self.model_params,
-                    forecast_chunk,
-                    chunk,
-                    self.dynamic_forcings
+                    self.model_params, forecast_chunk, chunk, self.dynamic_forcings
                 )
             else:
                 forecast_chunk = self.ema_model.forward_eval(
-                    self.model_params,
-                    forecast_chunk,
-                    chunk,
-                    self.dynamic_forcings
+                    self.model_params, forecast_chunk, chunk, self.dynamic_forcings
                 )
 
             if should_write_output:
@@ -271,8 +265,16 @@ class Trainer(TrainerBase):
 
             return preds_full
 
-    def inference(self, cf, devices, run_id_contd, mini_epoch_contd):
-        # general initalization
+    def inference(self, cf, devices, run_id_contd, mini_epoch_contd, name=None):
+        self._setup_inference(cf, devices, run_id_contd, mini_epoch_contd, name)
+        logger.info(f"Starting inference with id={self.cf.general.run_id}.")
+        self.validate(0, self.test_cfg, self.batch_size_test_per_gpu)
+        logger.info(f"Finished inference run with id: {self.cf.general.run_id}")
+
+    # general initalization
+    def _setup_inference(
+        self, cf, devices: str, run_id_contd: str, mini_epoch_contd: int, name: str | None
+    ):
         self.init(cf, devices)
 
         cf = self.cf
@@ -328,13 +330,7 @@ class Trainer(TrainerBase):
         self.loss_calculator_val = LossCalculator(cf, self.test_cfg, VAL, device=self.devices[0])
 
         if is_root():
-            config.save(self.cf, mini_epoch=0)
-
-        logger.info(f"Starting inference with id={self.cf.general.run_id}.")
-
-        # inference validation set
-        self.validate(0, self.test_cfg, self.batch_size_test_per_gpu)
-        logger.info(f"Finished inference run with id: {cf.general.run_id}")
+            config.save(self.cf, mini_epoch=0, name=name)
 
     def run(self, cf, devices, run_id_contd=None, mini_epoch_contd=None):
         # general initalization
@@ -554,7 +550,7 @@ class Trainer(TrainerBase):
                     self.model_params,
                     batch.get_source_samples(),
                     batch.get_output_idxs(),
-                    self.dynamic_forcings
+                    self.dynamic_forcings,
                 )
 
                 targets_and_auxs = {}

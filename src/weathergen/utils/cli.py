@@ -29,7 +29,7 @@ def get_main_parser() -> argparse.ArgumentParser:
     inference_parser = subparsers.add_parser(
         Stage.inference,
         help="Run infernce on a trained WeatherGenerator configuration",
-        exit_on_error=False
+        exit_on_error=False,
     )
     _add_inference_args(inference_parser)
     coupling_parser = subparsers.add_parser(
