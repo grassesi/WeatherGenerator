@@ -28,6 +28,7 @@ from weathergen.datasets.data_reader_base import (
 )
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.elevation import ElevatingReader
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
@@ -213,6 +214,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         return np.arange(perms_len)
 
+    def _forecast_time_step(self) -> np.timedelta64:
+        """Time between two forecast steps, falling back to the window step when not forecasting.
+
+        forecast.time_step defaults to zero (FORECAST_DEFAULTS), which would collapse every
+        step-derived schedule onto the start of the run.
+        """
+        return self.time_step if self.time_step > np.timedelta64(0, "ms") else self.step_timedelta
+
     def _init_stream_datasets(self, cf) -> dict[StreamName, _Stream]:
         """Load dataset readers for all streams from config."""
         streams_datasets: dict[StreamName, _Stream] = {}
@@ -269,6 +278,10 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 ds = dataset(filename=filename, **kwargs)
                 if stream_info.get("average_window", False):
                     ds = AveragingReader(ds)
+                if stream_info.get("elevation", None):
+                    ds = ElevatingReader(
+                        ds, self.time_window_handler.t_start, self._forecast_time_step()
+                    )
 
                 streams_datasets[stream_name].readers += [ds]
 
