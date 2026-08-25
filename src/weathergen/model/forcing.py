@@ -27,11 +27,16 @@ class ForcedModel(Model):
     def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size):
         super().__init__(cf, sources_size, targets_num_channels, targets_coords_size)
 
-        self.forcing_engine = ForcingEngine(self.cf, self.cf.get("ffe_num_blocks", 0))
+        n_blocks_forcing = self.cf.get("ffe_num_blocks", 0)
+        self.forcing_engine = (
+            ForcingEngine(self.cf, n_blocks_forcing) if n_blocks_forcing > 0 else None
+        )
 
     def _gather_parameters(self) -> dict[str, int]:
         num_params = super()._gather_parameters()
-        num_params["ffe"] = get_num_parameters(self.forcing_engine.blocks)
+        num_params["ffe"] = (
+            get_num_parameters(self.forcing_engine.blocks) if self.forcing_engine is not None else 0
+        )
         return num_params
 
     def _print_components(self, num_params):
@@ -269,7 +274,7 @@ class ForcingEngine(torch.nn.Module):
     def __init__(self, cf: Config, n_blocks=1):
         super().__init__()
         self.cf = cf
-        
+
         blocks = []
         for _ in range(n_blocks):
             blocks.extend(self.get_block())
