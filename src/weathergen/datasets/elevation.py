@@ -91,14 +91,6 @@ def parse_elevations(
     if not elevations:
         return {}
 
-    # Follows parse_target_channel_weights: unmatched names are reported, not fatal, since the
-    # same overwrite file is routinely applied to streams with differing channel selections.
-    unmatched = [ch for ch in elevations if ch not in channels]
-    if unmatched:
-        _logger.info(
-            f"Unmatched {ELEVATION_KEY} channels in {stream_info.get('name')}: {unmatched}"
-        )
-
     schedule = {}
     for channel, idx in zip(channels, channels_idx, strict=True):
         entry = elevations.get(channel, None)
@@ -192,6 +184,14 @@ class ElevatingReader(DataReaderBase):
             anchor_time,
             forecast_time_step,
         )
+
+        configured = self.stream_info.get(ELEVATION_KEY) or {}
+        known = set(self.source_channels) | set(self.target_channels)
+        unmatched = [ch for ch in configured if ch not in known]
+        if unmatched:
+            _logger.info(
+                f"Unmatched {ELEVATION_KEY} channels in {self.stream_info.get('name')}: {unmatched}"
+            )
 
         for side, schedule in (
             ("source", self._source_elevations),
