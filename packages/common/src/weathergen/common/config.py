@@ -198,13 +198,19 @@ def format_cf(config: Config) -> str:
     return stream.getvalue()
 
 
-def save(config: Config, mini_epoch: int | None):
-    """Save current config into the current runs model directory."""
+def save(config: Config, mini_epoch: int | None, name: str | None = None):
+    """
+    Save current config into the current runs model directory.
+
+    `name` identifies a component within the run. A coupled run drives several components under
+    one run_id, and without it each would overwrite the others' config file. It is None for an
+    ordinary single-model run, which keeps the filename exactly as it has always been.
+    """
     # save in directory with model files
     dirname = get_path_model(config)
     dirname.mkdir(exist_ok=True, parents=True)
 
-    fname = _get_model_config_file_write_name(get_run_id_from_config(config), mini_epoch)
+    fname = _get_model_config_file_name(get_run_id_from_config(config), mini_epoch, name)
 
     json_str = json.dumps(OmegaConf.to_container(_strip_interpolation(config)))
     with (dirname / fname).open("w") as f:
@@ -235,8 +241,8 @@ def load_run_config(run_id: str, mini_epoch: int | None, model_path: str | None)
         else:
             path = Path(model_path) / run_id
 
-        config_path_with_epoch = path / _get_model_config_file_read_name(run_id, mini_epoch)
-        config_path_without_epoch = path / _get_model_config_file_read_name(run_id, None)
+        config_path_with_epoch = path / _get_model_config_file_name(run_id, mini_epoch)
+        config_path_without_epoch = path / _get_model_config_file_name(run_id, None)
 
         if config_path_with_epoch.exists():
             fname = config_path_with_epoch
@@ -263,8 +269,16 @@ def load_run_config(run_id: str, mini_epoch: int | None, model_path: str | None)
     return _apply_fixes(config)
 
 
-def _get_model_config_file_write_name(run_id: str, mini_epoch: int | None):
-    """Generate the filename for writing a model config file."""
+def _get_model_config_file_name(
+    run_id: str, mini_epoch: int | None, name: str | None = None
+) -> str:
+    """
+    Generate the filename of a model config file.
+
+    `name` is the component name within a coupled run, which drives several components under one
+    run_id and would otherwise have them overwrite each other's file. None gives the historical
+    filename, so every single-model run reads and writes exactly the paths it always has.
+    """
     if mini_epoch is None:
         mini_epoch_str = ""
     elif mini_epoch == -1:
@@ -272,19 +286,9 @@ def _get_model_config_file_write_name(run_id: str, mini_epoch: int | None):
     else:
         mini_epoch_str = f"_chkpt{mini_epoch:05d}"
 
-    return f"model_{run_id}{mini_epoch_str}.json"
+    name_str = f"_{name}" if name else ""
 
-
-def _get_model_config_file_read_name(run_id: str, mini_epoch: int | None):
-    """Generate the filename for reading a model config file."""
-    if mini_epoch is None:
-        mini_epoch_str = ""
-    elif mini_epoch == -1:
-        mini_epoch_str = "_latest"
-    else:
-        mini_epoch_str = f"_chkpt{mini_epoch:05d}"
-
-    return f"model_{run_id}{mini_epoch_str}.json"
+    return f"model_{run_id}{name_str}{mini_epoch_str}.json"
 
 
 def get_model_results(run_id: str, mini_epoch: int, rank: int) -> Path:
