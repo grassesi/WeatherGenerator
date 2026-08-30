@@ -119,7 +119,7 @@ def _sanitize_time_keys(conf: Config) -> Config:
     """
 
     conf = conf.copy()
-    
+
     for stream in conf.streams.values():
         _sanitize_delta_time_keys(stream)
 
@@ -199,13 +199,7 @@ def format_cf(config: Config) -> str:
 
 
 def save(config: Config, mini_epoch: int | None, name: str | None = None):
-    """
-    Save current config into the current runs model directory.
-
-    `name` identifies a component within the run. A coupled run drives several components under
-    one run_id, and without it each would overwrite the others' config file. It is None for an
-    ordinary single-model run, which keeps the filename exactly as it has always been.
-    """
+    """Save current config into the current runs model directory."""
     # save in directory with model files
     dirname = get_path_model(config)
     dirname.mkdir(exist_ok=True, parents=True)
@@ -272,13 +266,7 @@ def load_run_config(run_id: str, mini_epoch: int | None, model_path: str | None)
 def _get_model_config_file_name(
     run_id: str, mini_epoch: int | None, name: str | None = None
 ) -> str:
-    """
-    Generate the filename of a model config file.
-
-    `name` is the component name within a coupled run, which drives several components under one
-    run_id and would otherwise have them overwrite each other's file. None gives the historical
-    filename, so every single-model run reads and writes exactly the paths it always has.
-    """
+    """Generate the filename of a model config file."""
     if mini_epoch is None:
         mini_epoch_str = ""
     elif mini_epoch == -1:
@@ -420,7 +408,7 @@ def load_merge_configs(
     Returns:
         Merged configuration object.
     """
-    private_config = _load_private_conf(private_home)    
+    private_config = _load_private_conf(private_home)
     overwrite_configs = _load_overwrites(overwrites)
 
     if from_run_id is None:
@@ -439,19 +427,21 @@ def load_merge_configs(
 
     return c
 
+
 def _resolve_streams(base_conf: Config, overwrites: list[Config]) -> Config:
-    """Resolve streams properly: """
+    """Resolve streams properly:"""
     streams_directory = base_conf.get("streams_directory")
     _original_streams_directory = streams_directory
 
     for overwrite in overwrites:
         streams_directory = overwrite.get("streams_directory", streams_directory)
-    
-    assert streams_directory is not None and Path(streams_directory).is_dir(), \
-        f"{streams_directory} is not a valid directory."
 
-    is_streams_unintialized = (
-        "streams" in OmegaConf.missing_keys(base_conf) or not base_conf.get("streams")
+    assert streams_directory is not None and Path(streams_directory).is_dir(), (
+        f"{streams_directory} is not a valid directory."
+    )
+
+    is_streams_unintialized = "streams" in OmegaConf.missing_keys(base_conf) or not base_conf.get(
+        "streams"
     )
     is_stream_dir_changed = _original_streams_directory != streams_directory
     if is_streams_unintialized or is_stream_dir_changed:
@@ -459,11 +449,11 @@ def _resolve_streams(base_conf: Config, overwrites: list[Config]) -> Config:
         streams = load_streams(Path(streams_directory))
     else:
         logging.info(
-            "Stream confs exist and streams directory has not changed:"+
-            "No need to reload streams from directory."
+            "Stream confs exist and streams directory has not changed:"
+            + "No need to reload streams from directory."
         )
         streams = base_conf.streams
-    
+
     for overwrite in overwrites:
         overwrite_streams = overwrite.get("streams", {})
         for stream_name, stream_conf in overwrite_streams.items():
@@ -471,8 +461,9 @@ def _resolve_streams(base_conf: Config, overwrites: list[Config]) -> Config:
             try:
                 streams[stream_name] = OmegaConf.merge(streams[stream_name], stream_conf)
             except KeyError as e:
-                logging.warning("Trying to overwrite non existing stream:"
-                    +f"{stream_name}, make sure the correct streams directory is used."
+                logging.warning(
+                    "Trying to overwrite non existing stream:"
+                    + f"{stream_name}, make sure the correct streams directory is used."
                 )
 
     return streams
@@ -494,7 +485,7 @@ def _load_overwrites(overwrites: list[Path | dict | Config]) -> list[Config]:
             c = _load_overwrite_conf(path)
             assert isinstance(c, DictConfig)
             overwrite_configs.append(c)
-    
+
     return overwrite_configs
 
 
