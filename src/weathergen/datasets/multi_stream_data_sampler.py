@@ -124,6 +124,16 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.batch_size = get_batch_size_from_config(mode_cfg)
         self.shuffle = mode_cfg.shuffle
 
+        # Stride between successive samples, in index units. window(idx) is
+        # start_date + idx * time_window_step, so components on different sampling grids only
+        # share an absolute time axis if each strides by its own count of windows. Set by the
+        # coupled driver, which owns the duration -> index conversion; 1 everywhere else, which
+        # is the previous behaviour exactly.
+        self.sample_stride = int(mode_cfg.get("sample_stride", 1))
+        assert self.sample_stride >= 1, (
+            f"sample_stride must be >= 1, got {self.sample_stride}."
+        )
+
         self.len_timedelta = mode_cfg.time_window_len
         self.step_timedelta = mode_cfg.time_window_step
         tw = TimeWindowHandler(
@@ -162,7 +172,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             // self.step_timedelta  # as number of indexs
         )
 
-        available_samples = max_index * self.batch_size  # as number of samples
+        # only every sample_stride-th index is ever visited
+        available_samples = (max_index // self.sample_stride) * self.batch_size
 
         assert available_samples > 0, (
             "There is an insufficient date range to \
@@ -789,7 +800,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         # bidx is used to count the #batches that have been emitted
         # idx_raw is used to index into the dataset; the decoupling is needed
         # since there are empty batches
-        idx_raw = iter_start
+        # iter_start counts batch slots, idx_raw counts windows, so the stride converts
+        # between them; with sample_stride == 1 this is the previous behaviour verbatim
+        idx_raw = iter_start * self.sample_stride
         for i, _bidx in enumerate(range(iter_start, iter_end, self.batch_size)):
             # num_forecast_steps needs to be constant per batch
             # (amortized through data parallel training)
@@ -799,7 +812,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             # ensure batches are not empty
             while True:
                 idx: TIndex = perms[idx_raw % perms.shape[0]]
-                idx_raw += 1
+                # skipping advances by a whole stride so the sampler stays on its grid
+                idx_raw += self.sample_stride
 
                 batch = self._get_batch(idx, num_forecast_steps)
 

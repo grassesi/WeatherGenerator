@@ -162,6 +162,30 @@ def get_target_idxs_from_cfg(cfg, loss_name) -> list[int] | None:
     return target_idxs
 
 
+def resolve_stage_configs(cf) -> tuple[OmegaConf, OmegaConf, OmegaConf]:
+    """
+    Resolve the training -> validation -> test config cascade.
+
+    validation_config is merged onto training_config, and test_config onto the *validation*
+    config, so a key set only in validation_config survives into test_config unless
+    overridden. Factored out of Trainer.init so a caller that needs the effective test_cfg
+    before a Trainer exists - e.g. the coupled driver deriving per-component settings from a
+    global rollout spec - resolves it the same way rather than reimplementing the cascade.
+
+    Returns: (training_cfg, validation_cfg, test_cfg)
+    """
+
+    training_cfg = filter_config_by_enabled(cf.get("training_config"), cfg_keys_to_filter)
+    validation_cfg = get_active_stage_config(
+        training_cfg, cf.get("validation_config", {}), cfg_keys_to_filter
+    )
+    test_cfg = get_active_stage_config(
+        validation_cfg, cf.get("test_config", {}), cfg_keys_to_filter
+    )
+
+    return training_cfg, validation_cfg, test_cfg
+
+
 def get_active_stage_config(
     base_config: dict | OmegaConf, merge_config: dict | OmegaConf, keys_to_filter: list[str]
 ) -> dict | OmegaConf:
