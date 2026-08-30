@@ -13,6 +13,7 @@ import datetime
 
 import numpy as np
 import pytest
+import torch
 
 from weathergen.datasets.data_reader_base import (
     DataReaderTimestep,
@@ -28,6 +29,7 @@ from weathergen.datasets.extension import (
     _sin_julian_day,
     _sin_local_time,
 )
+from weathergen.datasets.stream_data import StreamData
 
 N_POINTS = 6
 # z, lsm are constant in the store and get persisted; insolation and the time terms are recomputed
@@ -207,6 +209,35 @@ def test_stored_template_survives_repeated_reads(reader):
 
     assert not np.allclose(second.geoinfos, -999.0)
     assert not np.allclose(second.coords, -999.0)
+
+
+def _stream_data_with(n_steps: int, extended: list[int]) -> StreamData:
+    """A StreamData whose target tokens are all NaN, with `extended` steps flagged."""
+    sdata = StreamData(idx=0, input_steps=1, output_steps=n_steps, healpix_cells=48)
+    for step in range(n_steps):
+        sdata.target_tokens[step] = torch.full((4, 1), torch.nan)
+        sdata.target_is_extended[step] = step in extended
+    return sdata
+
+
+def test_extended_steps_do_not_make_a_batch_look_all_nan():
+    """
+    Blocker this guards: is_nan() rejects a batch whose targets are all NaN, inside a `while True`
+    that then draws the next index. A rollout entirely past the data end would spin forever.
+    """
+    assert not _stream_data_with(3, extended=[0, 1, 2]).target_nan()
+
+    # a step that really is all-NaN still counts, so the existing guard keeps working
+    assert _stream_data_with(3, extended=[1, 2]).target_nan()
+
+
+def test_is_extended_is_step_scoped_unlike_is_spoof():
+    sdata = _stream_data_with(3, extended=[2])
+
+    assert not sdata.is_extended(0)
+    assert sdata.is_extended(2)
+    # and it does not leak into the spoof flag, which the writer keys off
+    assert not sdata.is_spoof(2)
 
 
 @pytest.mark.parametrize(
