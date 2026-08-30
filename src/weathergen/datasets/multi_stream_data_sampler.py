@@ -28,6 +28,7 @@ from weathergen.datasets.data_reader_base import (
 )
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.extension import EXTENSION_KEY, ExtendingReader
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
@@ -269,6 +270,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 ds = dataset(filename=filename, **kwargs)
                 if stream_info.get("average_window", False):
                     ds = AveragingReader(ds)
+                # outermost, so the window it persists is what the pipeline would have produced
+                if stream_info.get(EXTENSION_KEY, False):
+                    ds = ExtendingReader(ds)
 
                 streams_datasets[stream_name].readers += [ds]
 
@@ -478,7 +482,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     (time_win_target.start, time_win_target.end),
                     target_mask,
                 )
-                stream_data.add_target_coords(self._stage, timestep_idx, tc, tc_l, rdata.is_spoof)
+                stream_data.add_target_coords(
+                    self._stage, timestep_idx, tc, tc_l, rdata.is_spoof, rdata.is_extended
+                )
 
             if "target_values" in mode:
                 (tt_cells, tt_t, tt_c, idxs_inv) = self.tokenizer.get_target_values(
@@ -490,7 +496,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 )
 
                 stream_data.add_target_values(
-                    self._stage, timestep_idx, tt_cells, tt_c, tt_t, idxs_inv, rdata.is_spoof
+                    self._stage,
+                    timestep_idx,
+                    tt_cells,
+                    tt_c,
+                    tt_t,
+                    idxs_inv,
+                    rdata.is_spoof,
+                    rdata.is_extended,
                 )
 
         return stream_data

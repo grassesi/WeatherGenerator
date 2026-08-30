@@ -87,6 +87,9 @@ class StreamData:
 
         self.source_is_spoof = [False for _ in range(self.input_steps)]
         self.target_is_spoof = [False for _ in range(self.output_steps)]
+        # target window lies beyond the end of the dataset: coords and geoinfos are real, values
+        # are not there at all. Excluded from the loss, but still worth predicting and writing.
+        self.target_is_extended = [False for _ in range(self.output_steps)]
 
         # initialize empty members
         self.sample_idx = idx
@@ -210,6 +213,7 @@ class StreamData:
         times_raw: torch.Tensor,
         idxs_inv: torch.Tensor,
         is_spoof: bool,
+        is_extended: bool = False,
     ) -> None:
         """
         Add data for target for one input.
@@ -244,6 +248,7 @@ class StreamData:
         self.target_coords_raw[fstep] = target_coords_raw
         self.idxs_inv[fstep] = idxs_inv
         self.target_is_spoof[fstep] = is_spoof
+        self.target_is_extended[fstep] = is_extended
 
     def add_target_values(
         self,
@@ -254,6 +259,7 @@ class StreamData:
         times_raw: torch.Tensor,
         idxs_inv: torch.Tensor,
         is_spoof: bool,
+        is_extended: bool = False,
     ) -> None:
         """
         Add data for target for one input.
@@ -291,6 +297,7 @@ class StreamData:
         self.idxs_inv[fstep] = idxs_inv
 
         self.target_is_spoof[fstep] = is_spoof
+        self.target_is_extended[fstep] = is_extended
 
     def add_target_coords(
         self,
@@ -299,6 +306,7 @@ class StreamData:
         target_coords: torch.Tensor,
         target_coords_per_cell: torch.Tensor,
         is_spoof: bool,
+        is_extended: bool = False,
     ) -> None:
         """
         Add data for target for one input.
@@ -330,6 +338,7 @@ class StreamData:
         self.target_coords_lens[fstep] = target_coords_per_cell
 
         self.target_is_spoof[fstep] = is_spoof
+        self.target_is_extended[fstep] = is_extended
 
     def target_empty(self) -> bool:
         """
@@ -382,7 +391,16 @@ class StreamData:
             True if target is empty for stream, else False
         """
 
-        is_nan = torch.isnan(torch.cat(self.target_tokens))
+        # Extended steps carry no values by construction, so their all-NaN tokens say nothing about
+        # whether this stream has data. Judging them would let a rollout that runs entirely past the
+        # end of the dataset declare every batch invalid.
+        tokens = [
+            t for step, t in enumerate(self.target_tokens) if not self.target_is_extended[step]
+        ]
+        if len(tokens) == 0:
+            return False
+
+        is_nan = torch.isnan(torch.cat(tokens))
         return is_nan.all() if len(is_nan) > 0 else False
 
     def source_nan(self) -> bool:
@@ -445,6 +463,12 @@ class StreamData:
         Either source or target at step is spoof
         """
         return any(self.source_is_spoof) or self.target_is_spoof[step]
+
+    def is_extended(self, step: int) -> bool:
+        """
+        Target at step lies beyond the end of the dataset: real coords, no values.
+        """
+        return self.target_is_extended[step]
 
 
 def spoof(healpix_level: int, datetime, geoinfo_size, num_channels) -> IOReaderData:

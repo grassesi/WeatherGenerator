@@ -1,0 +1,27 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to  it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Let a rollout continue past the last date in a stream's store.
+#
+# Without this, a forecast step beyond the end of the data gets an empty target window, which
+# degrades to a two-point spoof; since the decoder only evaluates at the target coordinates, the
+# step yields two points rather than a field. With it, those steps get the coordinates and geoinfos
+# of the last in-range window -- constant geoinfos persisted, insolation and the time terms
+# recomputed for the step's own date -- and NaN in place of the values, which do not exist.
+#
+# Only targets are extended. A *source* window past the end of the data means the initial condition
+# is missing, and nothing invents one; such a run is misconfigured and the reader says so once.
+# A forced model therefore cannot roll past the end of its forcing data: its forcing would be
+# zero-filled in normalized space, i.e. climatology. Use a non-forced or a coupled model instead.
+#
+# Extended steps are excluded from the loss, so metrics stay comparable with a run that stops at
+# the data end.
+
+streams:
+  ERA5-Ocean: {extend_beyond_data: True}

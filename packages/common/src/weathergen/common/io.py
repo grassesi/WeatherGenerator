@@ -133,6 +133,9 @@ class IOReaderData:
     data: NDArray[DType]
     datetimes: NDArray[NPDT64]
     is_spoof: bool = False
+    # Real geometry and geoinfos for a window beyond the end of the dataset, with no values to go
+    # with them. Distinct from is_spoof, which marks data that is not real at all.
+    is_extended: bool = False
 
     def is_empty(self):
         """
@@ -175,6 +178,8 @@ class IOReaderData:
         data = np.zeros((0, other.data.shape[1]), dtype=other.data.dtype)
         datetimes = np.array([], dtype=other.datetimes.dtype)
         is_spoof = True
+        # a combined window is only extended if every contribution to it was
+        is_extended = True
 
         for other in others:
             n_datapoints = len(other.data)
@@ -187,8 +192,9 @@ class IOReaderData:
             data = np.concatenate([data, other.data])
             datetimes = np.concatenate([datetimes, other.datetimes])
             is_spoof = is_spoof and other.is_spoof
+            is_extended = is_extended and getattr(other, "is_extended", False)
 
-        return cls(coords, geoinfos, data, datetimes, is_spoof)
+        return cls(coords, geoinfos, data, datetimes, is_spoof, is_extended)
 
 
 @dataclasses.dataclass

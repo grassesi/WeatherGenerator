@@ -314,6 +314,7 @@ class LossPhysical(LossModuleBase):
                 targets_times_batch = target_cur[stream_name]["target_times"]
                 targets_params = target_cur[stream_name]["target_metda_data"]
                 targets_is_spoof = target_cur[stream_name]["is_spoof"]
+                targets_is_extended = target_cur[stream_name].get("is_extended", None)
 
                 output_step_weight = output_step_loss_weights[timestep_idx]
 
@@ -354,6 +355,25 @@ class LossPhysical(LossModuleBase):
                     for loss_fct, loss_fct_weight, loss_fct_name in self.loss_fcts:
                         # skip is loss is not computed for this sample
                         if loss_fct_name not in pred_params.global_params["loss"]:
+                            continue
+
+                        # Targets beyond the end of the dataset carry NaN values. Weighting them
+                        # to zero would not help -- 0.0 * NaN is NaN, which would poison the loss
+                        # reported for the whole stream, not just for the steps that have no data.
+                        # Skip them outright and report the step the way a spoofed one is reported.
+                        is_extended = (
+                            targets_is_extended[target_idx]
+                            if targets_is_extended is not None
+                            else False
+                        )
+                        if is_extended:
+                            losses_all[stream_name][str(timestep_idx)][loss_fct_name] = (
+                                defaultdict(dict)
+                            )
+                            for ch_n in target_channels:
+                                losses_all[stream_name][str(timestep_idx)][loss_fct_name][ch_n] = (
+                                    torch.nan
+                                )
                             continue
 
                         # spoofed inputs are masked in the output calculations

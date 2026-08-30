@@ -156,6 +156,9 @@ class ReaderData:
     data: NDArray[DType]
     datetimes: NDArray[NPDT64]
     is_spoof: bool = False
+    # Real geometry and geoinfos for a window that lies beyond the end of the dataset, with no
+    # values to go with them. Distinct from is_spoof, which marks data that is not real at all.
+    is_extended: bool = False
 
     @staticmethod
     def empty(num_data_fields: int, num_geo_fields: int) -> "ReaderData":
@@ -210,6 +213,8 @@ class ReaderData:
             self.geoinfos[idx_valid],
             self.data[idx_valid],
             self.datetimes[idx_valid],
+            self.is_spoof,
+            self.is_extended,
         )
 
     def shuffle(self, rng, shuffle: bool, num_subset: int) -> "ReaderData":
