@@ -43,8 +43,12 @@ Config = DictConfig
 def parse_timedelta(val: str | int | float | np.timedelta64) -> np.timedelta64:
     """
     Parse a value into a numpy timedelta64[ms].
-    Integers and floats are interpreted as hours.
+    Integers and floats are interpreted as SECONDS (pd.to_timedelta unit="s").
     Strings are parsed using pandas.to_timedelta.
+
+    Note this makes an unquoted YAML duration correct by coincidence: YAML resolves the
+    sexagesimal `24:00:00` to the integer 86400, which is the same 24h the quoted string
+    parses to. A bare `24` is 24 seconds, not 24 hours.
     """
     if isinstance(val, int | float | np.number):
         return np.timedelta64(pd.to_timedelta(val, unit="s")).astype("timedelta64[ms]")

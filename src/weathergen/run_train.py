@@ -17,11 +17,10 @@ import pdb
 import sys
 import time
 import traceback
-from pathlib import Path
 
 import weathergen.common.config as config
-from weathergen.common.coupling import Couplings
 import weathergen.utils.cli as cli
+from weathergen.common.coupling import Couplings
 from weathergen.common.logger import init_loggers
 from weathergen.train.trainer import Trainer
 
@@ -133,16 +132,19 @@ def run_inference(args):
 
 def run_coupled_inference(args):
     couplings = Couplings.from_args(args.couplings, args.components)
-    print(couplings)
+    logger.info(f"Coupled inference setup:\n{couplings}")
 
+    global_cf = couplings.global_intialization(args.run_id)
     try:
-        global_cf = couplings.global_intialization(args.run_id)
         couplings.run(args.private_config, global_cf)
     except Exception:
-        extype, value, tb = sys.exc_info()
+        # Never swallow the exception: the coupled setup validates itself with ValueErrors,
+        # and returning normally here would report success for a run that never happened.
         traceback.print_exc()
-        if global_cf.world_size == 1:
+        if global_cf.world_size == 1 and sys.stdin.isatty():
+            _, _, tb = sys.exc_info()
             pdb.post_mortem(tb)
+        raise
 
 
 def run_continue(args):

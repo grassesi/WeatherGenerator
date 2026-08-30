@@ -42,12 +42,10 @@ from weathergen.train.utils import (
     TRAIN,
     VAL,
     Stage,
-    cfg_keys_to_filter,
     extract_batch_metadata,
-    filter_config_by_enabled,
-    get_active_stage_config,
     get_batch_size_from_config,
     get_target_idxs_from_cfg,
+    resolve_stage_configs,
 )
 from weathergen.utils.distributed import is_root
 from weathergen.utils.performance import NullThroughputTracker, ThroughputTracker
@@ -132,20 +130,11 @@ class Trainer(TrainerBase):
 
         self.freeze_modules = cf.get("freeze_modules", "")
 
-        # get training config and remove disabled options (e.g. because of overrides)
-        self.training_cfg = cf.get("training_config")
-        self.training_cfg = filter_config_by_enabled(self.training_cfg, cfg_keys_to_filter)
+        # training -> validation -> test cascade; shared with the coupled driver, which has to
+        # resolve the effective test_cfg before a Trainer exists
+        self.training_cfg, self.validation_cfg, self.test_cfg = resolve_stage_configs(cf)
         assert len(self.training_cfg.model_input.keys()) != 0, (
             "You probably have no loss term enabled"
-        )
-
-        # validation and test configs are training configs, updated by specified keys
-        self.validation_cfg = get_active_stage_config(
-            self.training_cfg, cf.get("validation_config", {}), cfg_keys_to_filter
-        )
-        # test cfg is derived from validation cfg with specified keys overwritten
-        self.test_cfg = get_active_stage_config(
-            self.validation_cfg, cf.get("test_config", {}), cfg_keys_to_filter
         )
 
         # batch sizes

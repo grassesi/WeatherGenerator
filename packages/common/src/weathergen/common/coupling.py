@@ -4,9 +4,10 @@ import dataclasses
 import logging
 from pathlib import Path
 
+import numpy as np
 import torch
 import tqdm
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 import weathergen.common.config as config
 from weathergen.common.io import IOReaderData
@@ -15,7 +16,11 @@ from weathergen.datasets.data_reader_base import DataReaderBase
 from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
 from weathergen.train.trainer import Trainer
-from weathergen.train.utils import extract_batch_metadata, get_target_idxs_from_cfg
+from weathergen.train.utils import (
+    extract_batch_metadata,
+    get_target_idxs_from_cfg,
+    resolve_stage_configs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +46,13 @@ class ModelCheckpoint:
         self,
         private_config: Path | None,
         configs: list[Path] | None,
-        options: list[str],
+        options: list[str] | None,
         shared_config: config.Config
     ) -> tuple[Trainer, config.Config]:
         configs = [] if configs is None else configs
-        options_overwrite = config.from_cli_arglist(options)
+        # never None: OmegaConf.from_cli(None) falls back to sys.argv[1:], which would merge
+        # the shell command line into every component's config
+        options_overwrite = config.from_cli_arglist(options or [])
         cf = config.load_merge_configs(
             private_config,
             self.run_id,
@@ -59,33 +66,107 @@ class ModelCheckpoint:
 
 @dataclasses.dataclass
 class Coupling:
+    """One exchange surface: a stream a producer emits and a consumer may later ingest.
+
+    consumer is None while the components only run side by side, which is what lets the
+    interleaving be exercised before any field is actually exchanged.
+    """
+
     name: str
     producer: str
-    consumer: str
     stream: str
+    consumer: str | None = None
+
+
+@dataclasses.dataclass
+class Rollout:
+    """Global rollout spec - the single source of truth for how a coupled run advances.
+
+    Everything the components must agree on lives here and is pushed down onto each
+    component's test_config, rather than being checked between components that have no way to
+    be made to agree. chunk_length is a physical duration, so a component's chunk size is
+    chunk_length // its own forecast.time_step; chunk i then covers the same wall-clock
+    interval for every component, which is what makes interleaving by chunk index correct.
+    """
+
+    start_date: str
+    end_date: str
+    chunk_length: np.timedelta64
+    num_chunks: int
+    num_samples: int
+    forecast_offset: int = 1
+
+    @classmethod
+    def from_config(cls, cfg) -> Rollout:
+        required = ("start_date", "end_date", "chunk_length", "num_chunks", "num_samples")
+        missing = [key for key in required if cfg.get(key) is None]
+        if missing:
+            msg = f"The couplings file's 'rollout' section is missing: {missing}."
+            raise ValueError(msg)
+
+        rollout = cls(
+            start_date=str(cfg.start_date),
+            end_date=str(cfg.end_date),
+            chunk_length=config.parse_timedelta(cfg.chunk_length),
+            num_chunks=int(cfg.num_chunks),
+            num_samples=int(cfg.num_samples),
+            forecast_offset=int(cfg.get("forecast_offset", 1)),
+        )
+
+        for key in ("num_chunks", "num_samples"):
+            if getattr(rollout, key) < 1:
+                msg = f"rollout.{key} must be >= 1, got {getattr(rollout, key)}."
+                raise ValueError(msg)
+        if rollout.chunk_length <= np.timedelta64(0, "ms"):
+            msg = f"rollout.chunk_length must be positive, got {cfg.chunk_length!r}."
+            raise ValueError(msg)
+        if rollout.forecast_offset not in (0, 1):
+            msg = f"rollout.forecast_offset must be 0 or 1, got {rollout.forecast_offset}."
+            raise ValueError(msg)
+
+        return rollout
 
 @dataclasses.dataclass
 class Couplings:
+    rollout: Rollout
     couplings: dict[str, Coupling]
     checkpoints: dict[str, ModelCheckpoint]
-    _devices: str = dataclasses.field(init=False)
-    _run_history: list[tuple[str, int]] = dataclasses.field(init=False)
-    
+    _devices: str = dataclasses.field(init=False, default=None)
+    _run_history: list[tuple[str, int]] = dataclasses.field(init=False, default=None)
+
     def __str__(self) -> str:
-        return f"couplings: {self.couplings}\n{self.checkpoints}"
+        lines = [f"rollout: {self.rollout}", "couplings:"]
+        lines += [f"  {coupling}" for coupling in self.couplings.values()] or ["  (none)"]
+        lines += ["components:"]
+        lines += [
+            f"  {name} <- {ckpt.run_id}@{ckpt.mini_epoch}"
+            for name, ckpt in self.checkpoints.items()
+        ]
+        return "\n".join(lines)
 
     @classmethod
     def from_args(cls, couplings: Path, components: list[str]):
         components_kv = (component.split("=") for component in components)
         components = {
-            component: ModelCheckpoint(checkpoint_str) for component, checkpoint_str in components_kv
+            component: ModelCheckpoint(checkpoint_str)
+            for component, checkpoint_str in components_kv
         }
+
+        spec = OmegaConf.load(couplings)
+        if spec.get("rollout") is None:
+            msg = (
+                f"{couplings} has no top-level 'rollout' section. The rollout spec is the "
+                "single source of truth for a coupled run; see config/example_coupling.yml."
+            )
+            raise ValueError(msg)
+
+        rollout = Rollout.from_config(spec.rollout)
         parsed_couplings = {
-            name: Coupling(name, **coupling)
-            for name, coupling in OmegaConf.load(couplings).items()
+            name: Coupling(name=name, **coupling)
+            for name, coupling in (spec.get("couplings") or {}).items()
         }
-        
-        return cls(parsed_couplings, components)
+
+        return cls(rollout=rollout, couplings=parsed_couplings, checkpoints=components)
     
     def global_intialization(self, run_id: str) -> config.Config:
         # global setup
@@ -107,16 +188,15 @@ class Couplings:
     ):
         # instantiate all components
         components = {
-            name: checkpoint.get_component(
-                private_config, None, None, global_cf, 
-            ) for name, checkpoint in self.checkpoints.items()
+            name: checkpoint.get_component(private_config, [], [], global_cf)
+            for name, checkpoint in self.checkpoints.items()
         }
         
         for _, ccf in components.values():
             ccf.general.run_history += self._run_history
 
         # the coupler owns the loops: components are stepped, they do not run themselves
-        coupler = Coupler(components, self.couplings)
+        coupler = Coupler(components, self.couplings, self.rollout)
         coupler.setup(self._devices, self.checkpoints)
 
         run_id = global_cf.general.run_id
@@ -147,11 +227,13 @@ class Coupler:
         self,
         components: dict[str, tuple[Trainer, config.Config]],
         couplings: dict[str, Coupling] | None = None,
+        rollout: Rollout | None = None,
     ):
         # deterministic order: every rank must issue its collectives in the same sequence
         self._names = sorted(components)
         self._components = components
         self._couplings = couplings or {}
+        self._rollout = rollout
         self._subscribers: dict[str, list[ForcingInput]] = {}
 
     def trainer(self, name: str) -> Trainer:
@@ -161,7 +243,10 @@ class Coupler:
         return self._components[name][1]
 
     def setup(self, devices, checkpoints: dict[str, ModelCheckpoint]) -> None:
-        """Build every component, then verify they can share one run."""
+        """Derive every component's rollout settings, then build them."""
+        self._check_couplings()
+        self._derive_component_configs()
+
         for name in self._names:
             trainer, ccf = self._components[name]
             checkpoint = checkpoints[name]
@@ -170,140 +255,246 @@ class Coupler:
                 ccf, devices, checkpoint.run_id, checkpoint.mini_epoch, name
             )
 
-        self._check_couplings()
-        self._check_alignment()
-        self._check_output_streams()
+        self._check_derivation()
+        self._announce_couplings()
 
     # ------------------------------------------------------------------ checks
 
     def _check_couplings(self) -> None:
-        """Couplings are not acted on yet, but their names must resolve."""
+        """Coupling names must resolve, and each stream may have only one producer."""
+        producers: dict[str, str] = {}
         for coupling in self._couplings.values():
-            for role, component in (
-                ("producer", coupling.producer),
-                ("consumer", coupling.consumer),
-            ):
-                if component not in self._components:
-                    msg = (
-                        f"Coupling {coupling.name!r} names {role} {component!r}, "
-                        f"which is not one of the components {self._names}."
-                    )
-                    raise ValueError(msg)
+            if coupling.producer not in self._components:
+                msg = (
+                    f"Coupling {coupling.name!r} names producer {coupling.producer!r}, "
+                    f"which is not one of the components {self._names}."
+                )
+                raise ValueError(msg)
 
-            for role, component in (
-                ("producer", coupling.producer),
-                ("consumer", coupling.consumer),
-            ):
-                streams = self.config(component).streams
-                if coupling.stream not in streams:
-                    msg = (
-                        f"Coupling {coupling.name!r} uses stream {coupling.stream!r}, "
-                        f"which {role} {component!r} does not have."
-                    )
-                    raise ValueError(msg)
+            if coupling.consumer is not None and coupling.consumer not in self._components:
+                msg = (
+                    f"Coupling {coupling.name!r} names consumer {coupling.consumer!r}, "
+                    f"which is not one of the components {self._names}."
+                )
+                raise ValueError(msg)
 
-    def _check_alignment(self) -> None:
-        """Verify the components share one sample index space and one collective order.
+            streams = self.config(coupling.producer).streams
+            if coupling.stream not in streams:
+                msg = (
+                    f"Coupling {coupling.name!r} uses stream {coupling.stream!r}, which its "
+                    f"producer {coupling.producer!r} does not have."
+                )
+                raise ValueError(msg)
 
-        The shared output store keys samples by position, so the components must walk the
-        same time windows. And under FSDP every rank must issue the same collectives in
-        the same order, which constrains the forecast policy.
+            # one producer per stream keeps the shared output store collision-free by
+            # construction, rather than by asking the configs to be disjoint
+            if coupling.stream in producers:
+                msg = (
+                    f"Couplings {producers[coupling.stream]!r} and {coupling.name!r} both "
+                    f"produce stream {coupling.stream!r}. Each stream may be produced once, "
+                    "since components share one output store keyed <sample>/<stream>/<step>."
+                )
+                raise ValueError(msg)
+            producers[coupling.stream] = coupling.name
+
+    def _produced_streams(self, name: str) -> list[str]:
+        """Streams this component is the producer of, in declaration order."""
+        return [c.stream for c in self._couplings.values() if c.producer == name]
+
+    # ------------------------------------------------------------------ derivation
+
+    def _derive_component_configs(self) -> None:
+        """Push the global rollout spec down onto every component's test_config.
+
+        The components cannot be made to agree by hand - nothing overrides what is baked into
+        their checkpoints - so instead of checking them against each other, everything they
+        must share is derived here from one spec and written into test_config, the last layer
+        of the training -> validation -> test cascade.
+        """
+        if self._rollout is None:
+            msg = "Coupler requires a Rollout spec; none was provided."
+            raise ValueError(msg)
+
+        rollout = self._rollout
+        for name in self._names:
+            _, ccf = self._components[name]
+            # the effective test config, resolved the same way Trainer.init will resolve it
+            _, _, test_cfg = resolve_stage_configs(ccf)
+
+            time_step = test_cfg.get("forecast", {}).get("time_step")
+            window_step = test_cfg.get("time_window_step")
+            if time_step is None or window_step is None:
+                msg = (
+                    f"Component {name!r} is missing test_config.forecast.time_step or "
+                    "test_config.time_window_step; both are needed to place it on the "
+                    "shared time axis."
+                )
+                raise ValueError(msg)
+
+            fsteps_per_chunk = self._exact_ratio(
+                rollout.chunk_length, time_step, name, "forecast.time_step"
+            )
+            sample_stride = self._exact_ratio(
+                rollout.chunk_length, window_step, name, "time_window_step"
+            )
+
+            overrides = {
+                "start_date": f"${{{config._DATETIME_TYPE_NAME}:{rollout.start_date}}}",
+                "end_date": f"${{{config._DATETIME_TYPE_NAME}:{rollout.end_date}}}",
+                "_start_date": rollout.start_date,
+                "_end_date": rollout.end_date,
+                # successive initial conditions are one chunk apart; the sampler strides in
+                # index units, so each component covers the same absolute times
+                "sample_stride": sample_stride,
+                # inference writes every sample it runs, which only holds at batch size 1
+                "samples_per_mini_epoch": rollout.num_samples,
+                # each component shuffles with its own rng_seed, so they would otherwise
+                # visit different windows
+                "shuffle": False,
+                "forecast": {
+                    "offset": rollout.forecast_offset,
+                    "chunk_size": fsteps_per_chunk,
+                    "num_steps": rollout.num_chunks * fsteps_per_chunk,
+                    # 'random' policies draw the step count from a rank-dependent seed, so
+                    # ranks would issue different numbers of collectives and FSDP would hang
+                    "policy": "fixed",
+                },
+                "output": {
+                    "num_samples": rollout.num_samples,
+                    "streams": self._produced_streams(name),
+                },
+                "model_input": self._batch_size_one(name, test_cfg),
+            }
+
+            self._warn_on_overwrite(name, test_cfg, overrides, fsteps_per_chunk, sample_stride)
+
+            if not overrides["output"]["streams"]:
+                # no coupling names this component as a producer, so it has nothing to write
+                logger.info(
+                    f"Component {name!r} produces no coupled stream and will write no output."
+                )
+                overrides["output"]["num_samples"] = 0
+
+            with open_dict(ccf):
+                if ccf.get("test_config") is None:
+                    ccf.test_config = {}
+                # deep merge: forecast.time_step and the rest of the cascade survive
+                ccf.test_config = OmegaConf.merge(ccf.test_config, OmegaConf.create(overrides))
+
+    @staticmethod
+    def _exact_ratio(chunk_length, step, name: str, key: str) -> int:
+        """chunk_length // step, rejecting a remainder rather than flooring it silently."""
+        if step <= np.timedelta64(0, "ms"):
+            msg = f"Component {name!r} has a non-positive test_config.{key}: {step}."
+            raise ValueError(msg)
+        if chunk_length % step != np.timedelta64(0, "ms"):
+            msg = (
+                f"rollout.chunk_length ({chunk_length}) is not an exact multiple of component "
+                f"{name!r}'s test_config.{key} ({step}). The components would land on "
+                "different times and the interleaving would be meaningless."
+            )
+            raise ValueError(msg)
+
+        # a positive chunk_length that divides step exactly is necessarily >= one step
+        return int(chunk_length // step)
+
+    @staticmethod
+    def _batch_size_one(name: str, test_cfg) -> dict:
+        """Force batch size 1, which is what get_batch_size_from_config sums to.
+
+        Inference has no reason to batch, and the invariant that every sample run is a sample
+        written only holds at 1: validate() runs samples_per_mini_epoch // batch_size batches
+        but writes output.num_samples * batch_size of them.
+        """
+        entries = [
+            key
+            for key, cfg in test_cfg.get("model_input", {}).items()
+            if cfg.get("enabled", True)
+        ]
+        if len(entries) != 1:
+            msg = (
+                f"Component {name!r} has {len(entries)} enabled test_config.model_input "
+                f"entries ({entries}); coupled inference needs exactly one so that the batch "
+                "size is 1."
+            )
+            raise ValueError(msg)
+
+        return {entries[0]: {"num_samples": 1}}
+
+    @staticmethod
+    def _warn_on_overwrite(
+        name: str, test_cfg, overrides: dict, fsteps_per_chunk: int, sample_stride: int
+    ) -> None:
+        """Say what the rollout spec is taking over, so nothing changes silently."""
+        if test_cfg.get("shuffle", False):
+            logger.warning(
+                f"Component {name!r}: test_config.shuffle was True, forced to False. Each "
+                "component shuffles with its own rng_seed, so they would visit different "
+                "time windows."
+            )
+
+        policy = test_cfg.get("forecast", {}).get("policy")
+        if policy != "fixed":
+            logger.warning(
+                f"Component {name!r}: test_config.forecast.policy was {policy!r}, forced to "
+                "'fixed'. Rank-dependent step counts deadlock the FSDP collectives."
+            )
+
+        num_steps = test_cfg.get("forecast", {}).get("num_steps")
+        logger.info(
+            f"Component {name!r}: chunk_size={fsteps_per_chunk}, "
+            f"num_steps={overrides['forecast']['num_steps']} (was {num_steps}), "
+            f"sample_stride={sample_stride}, "
+            f"output.streams={overrides['output']['streams']}"
+        )
+
+    def _check_derivation(self) -> None:
+        """Post-condition: the derivation really did put the components on one axis.
+
+        These can no longer fail on a user's config - they catch a bug in the derivation.
         """
         reference = self._names[0]
         ref_cfg = self.trainer(reference).test_cfg
+        keys = ("start_date", "end_date", "shuffle", "samples_per_mini_epoch")
 
         for name in self._names[1:]:
             cfg = self.trainer(name).test_cfg
-            for key in self._SHARED_WINDOW_KEYS:
+            for key in keys:
                 if cfg.get(key) != ref_cfg.get(key):
                     msg = (
-                        f"Components {reference!r} and {name!r} disagree on "
-                        f"test_config.{key}: {ref_cfg.get(key)} vs {cfg.get(key)}. "
-                        "All components must span the same time windows."
+                        f"Derivation failed: {reference!r} and {name!r} disagree on "
+                        f"test_config.{key}: {ref_cfg.get(key)} vs {cfg.get(key)}."
                     )
                     raise ValueError(msg)
 
-            ref_batch = self.trainer(reference).batch_size_test_per_gpu
-            batch = self.trainer(name).batch_size_test_per_gpu
-            if batch != ref_batch:
+            if cfg.forecast.offset != ref_cfg.forecast.offset:
                 msg = (
-                    f"Components {reference!r} and {name!r} disagree on test batch size: "
-                    f"{ref_batch} vs {batch}. Output samples are keyed by "
-                    "batch_idx * batch_size, so the batch sizes must match."
-                )
-                raise ValueError(msg)
-
-            ref_offset = ref_cfg.get("forecast", {}).get("offset")
-            offset = cfg.get("forecast", {}).get("offset")
-            if offset != ref_offset:
-                msg = (
-                    f"Components {reference!r} and {name!r} disagree on "
-                    f"test_config.forecast.offset: {ref_offset} vs {offset}."
+                    f"Derivation failed: {reference!r} and {name!r} disagree on "
+                    f"test_config.forecast.offset."
                 )
                 raise ValueError(msg)
 
         for name in self._names:
-            cfg = self.trainer(name).test_cfg
-            if cfg.get("shuffle", False):
-                msg = (
-                    f"Component {name!r} has test_config.shuffle=True. Each component "
-                    "shuffles with its own rng_seed, so the components would visit "
-                    "different time windows. Set shuffle: False."
-                )
+            batch_size = self.trainer(name).batch_size_test_per_gpu
+            if batch_size != 1:
+                msg = f"Derivation failed: component {name!r} has batch size {batch_size}, not 1."
                 raise ValueError(msg)
 
-            policy = cfg.get("forecast", {}).get("policy")
-            if policy not in self._RANK_UNIFORM_POLICIES:
-                msg = (
-                    f"Component {name!r} uses forecast.policy={policy!r}. The per-batch "
-                    "forecast step count is then drawn from a seed that "
-                    "MultiStreamDataSampler.worker_workset makes rank-dependent, so ranks "
-                    "would run different numbers of steps and the collectives would "
-                    f"deadlock. Use one of {list(self._RANK_UNIFORM_POLICIES)}."
-                )
-                raise ValueError(msg)
-
-        time_steps = {
-            name: str(self.trainer(name).test_cfg.get("forecast", {}).get("time_step"))
-            for name in self._names
-        }
-        if len(set(time_steps.values())) > 1:
-            logger.warning(
-                "Components advance at different forecast time steps: "
-                f"{time_steps}. They are interleaved by chunk index, so chunk i is a "
-                "different physical time for each of them. Harmless while they do not "
-                "interact, but it must become a shared time axis before coupling."
-            )
-
-    def _output_streams(self, name: str) -> list[str]:
-        """Streams this component will write, or empty if it writes nothing."""
-        trainer = self.trainer(name)
-        output_cfg = trainer.test_cfg.get("output", {})
-        if output_cfg.get("num_samples", 0) <= 0:
-            return []
-
-        streams = output_cfg.get("streams")
-        if streams is None:
-            return list(trainer.cf.streams.keys())
-
-        return list(streams)
-
-    def _check_output_streams(self) -> None:
-        """All components write into one store, keyed by <sample>/<stream>/<step>."""
-        owner: dict[str, str] = {}
+    def _announce_couplings(self) -> None:
+        """A run that exchanges nothing looks exactly like one that works. Say which it is."""
+        active = [c.name for c in self._couplings.values() if c.consumer is not None]
+        logger.info(
+            f"{len(self._couplings)} coupling(s) declared, {len(active)} with a consumer. "
+            "No field is exchanged at this milestone: components run side by side and each "
+            "must reproduce its standalone output exactly."
+        )
         for name in self._names:
-            for stream in self._output_streams(name):
-                if stream in owner:
-                    msg = (
-                        f"Components {owner[stream]!r} and {name!r} would both write "
-                        f"stream {stream!r} into the shared output store, overwriting "
-                        "each other. Give each component a disjoint "
-                        "test_config.output.streams."
-                    )
-                    raise ValueError(msg)
-                owner[stream] = name
-
-        logger.info(f"Output streams per component: {owner}")
+            forcing = self.trainer(name).dynamic_forcings
+            if forcing is not None and not forcing.is_empty:
+                logger.info(
+                    f"Component {name!r} samples its dynamic forcings from disk, not from "
+                    f"another component: {sorted(forcing.forcing_streams)}."
+                )
 
     # ------------------------------------------------------------------ driving
 
@@ -357,6 +548,17 @@ class Coupler:
             for sample in batch.get_source_samples().get_samples()
         ]
 
+    def _valid_times(self, name: str, batch) -> list:
+        """Absolute start times of a batch's source windows, for this component's grid.
+
+        Sample indices are not comparable across components: each strides its own index
+        space (window(idx) = start_date + idx * time_window_step), so aligned components sit
+        at different indices that denote the same instant. Comparing the times instead is
+        both correct under striding and stricter than comparing indices ever was.
+        """
+        twh = self.trainer(name).dataset.time_window_handler
+        return [twh.window(idx).start for idx in self._sample_idxs(batch)]
+
     def _assert_aligned(self, batches: dict, bidx: int) -> None:
         """All components must be looking at the same time windows.
 
@@ -366,14 +568,14 @@ class Coupler:
         dates under one sample index.
         """
         reference = self._names[0]
-        ref_idxs = self._sample_idxs(batches[reference])
+        ref_times = self._valid_times(reference, batches[reference])
         for name in self._names[1:]:
-            idxs = self._sample_idxs(batches[name])
-            if idxs != ref_idxs:
+            times = self._valid_times(name, batches[name])
+            if times != ref_times:
                 msg = (
                     f"Components drifted apart at batch {bidx}: {reference!r} is at "
-                    f"samples {ref_idxs}, {name!r} at {idxs}. A component skipped an "
-                    "empty or NaN batch that the others did not."
+                    f"{ref_times}, {name!r} at {times}. A component skipped an empty or NaN "
+                    "batch that the others did not."
                 )
                 raise RuntimeError(msg)
 

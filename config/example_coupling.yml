@@ -1,4 +1,43 @@
-Atmo-Ocean:
-  producer: Ocean # => has ERA5-Ocean as target
-  consumer: Atmo # => has ERA5-Ocean as source
-  stream: ERA5-Ocean
+# Coupled inference spec.
+#
+# `rollout` is the single source of truth for how the run advances: every setting the
+# components must share is derived from it and written onto each component's test_config,
+# rather than being checked between components that cannot be made to agree.
+#
+# chunk_length is a physical duration, so each component's chunk size is
+# chunk_length // its own forecast.time_step (atmo at 6h -> 4, ocean at 24h -> 1). Chunk i
+# therefore covers the same wall-clock interval for every component, which is what makes
+# interleaving by chunk index correct rather than merely harmless.
+#
+# Components are named on the command line:
+#   inference config/example_coupling.yml Ocean=<run_id>@<mini_epoch> Atmo=<run_id>@<mini_epoch>
+
+rollout:
+  start_date: 2023-01-01T00:00
+  end_date: 2023-12-31T00:00
+
+  # duration of one chunk, and the spacing between successive initial conditions
+  chunk_length: '24:00:00'
+
+  # horizon = num_chunks * chunk_length; here 124 days
+  num_chunks: 124
+
+  # independent initial conditions. Inference writes every sample it runs, so this sets both
+  # samples_per_mini_epoch and output.num_samples, and the batch size is forced to 1.
+  num_samples: 1
+
+  forecast_offset: 1
+
+# Each coupling is one exchange surface. A component writes exactly the streams it produces,
+# so the shared output store cannot collide. `consumer` is null while the components only run
+# side by side: nothing is exchanged yet, and each must reproduce its standalone output.
+couplings:
+  sst_from_ocean:
+    producer: Ocean
+    consumer: null # => Atmo, once the exchange is wired up
+    stream: ERA5-Ocean
+
+  atmo_from_atmo:
+    producer: Atmo
+    consumer: null # => Ocean, once the exchange is wired up
+    stream: ERA5
