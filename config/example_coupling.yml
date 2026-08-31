@@ -1,18 +1,12 @@
 rollout:
   start_date: 2023-01-01T00:00
   end_date: 2023-12-31T00:00
-
-  # duration of one chunk, and the spacing between successive initial conditions
   chunk_length: '24:00:00'
-
-  # horizon = num_chunks * chunk_length; here 124 days
   num_chunks: 124
-
-  # independent initial conditions. Inference writes every sample it runs, so this sets both
-  # samples_per_mini_epoch and output.num_samples, and the batch size is forced to 1.
   num_samples: 1
-
   forecast_offset: 1
+  # num_workers: 0        # DataLoader workers per component. 0 loads in the main process.
+  # accumulate_chunks: false  # keep every chunk's state to score the assembled rollout
 
 couplings:
   sst_from_ocean:

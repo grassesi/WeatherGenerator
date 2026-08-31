@@ -95,6 +95,8 @@ class Rollout:
     num_chunks: int
     num_samples: int
     forecast_offset: int = 1
+    num_workers: int = 0 # Dont use forked pools of workers for dataloaders
+    accumulate_chunks: bool = False
 
     @classmethod
     def from_config(cls, cfg) -> Rollout:
@@ -111,6 +113,8 @@ class Rollout:
             num_chunks=int(cfg.num_chunks),
             num_samples=int(cfg.num_samples),
             forecast_offset=int(cfg.get("forecast_offset", 1)),
+            num_workers=int(cfg.get("num_workers", 0)),
+            accumulate_chunks=bool(cfg.get("accumulate_chunks", False)),
         )
 
         for key in ("num_chunks", "num_samples"):
@@ -122,6 +126,9 @@ class Rollout:
             raise ValueError(msg)
         if rollout.forecast_offset not in (0, 1):
             msg = f"rollout.forecast_offset must be 0 or 1, got {rollout.forecast_offset}."
+            raise ValueError(msg)
+        if rollout.num_workers < 0:
+            msg = f"rollout.num_workers must be >= 0, got {rollout.num_workers}."
             raise ValueError(msg)
 
         return rollout
@@ -358,6 +365,7 @@ class Coupler:
                     # 'random' policies draw the step count from a rank-dependent seed, so
                     # ranks would issue different numbers of collectives and FSDP would hang
                     "policy": "fixed",
+                    "accumulate_chunks": rollout.accumulate_chunks,
                 },
                 "output": {
                     "num_samples": rollout.num_samples,
@@ -366,7 +374,9 @@ class Coupler:
                 "model_input": self._batch_size_one(name, test_cfg),
             }
 
-            self._warn_on_overwrite(name, test_cfg, overrides, fsteps_per_chunk, sample_stride)
+            self._warn_on_overwrite(
+                name, test_cfg, overrides, fsteps_per_chunk, sample_stride, rollout.num_workers
+            )
 
             if not overrides["output"]["streams"]:
                 # no coupling names this component as a producer, so it has nothing to write
@@ -380,6 +390,12 @@ class Coupler:
                     ccf.test_config = {}
                 # deep merge: forecast.time_step and the rest of the cascade survive
                 ccf.test_config = OmegaConf.merge(ccf.test_config, OmegaConf.create(overrides))
+
+                # Each component opens its own loader and the worker pools are forked one
+                # after the other, so this is a per-run global, not a per-component knob.
+                if ccf.get("data_loading") is None:
+                    ccf.data_loading = {}
+                ccf.data_loading.num_workers = rollout.num_workers
 
     @staticmethod
     def _exact_ratio(chunk_length, step, name: str, key: str) -> int:
@@ -423,7 +439,12 @@ class Coupler:
 
     @staticmethod
     def _warn_on_overwrite(
-        name: str, test_cfg, overrides: dict, fsteps_per_chunk: int, sample_stride: int
+        name: str,
+        test_cfg,
+        overrides: dict,
+        fsteps_per_chunk: int,
+        sample_stride: int,
+        num_workers: int,
     ) -> None:
         """Say what the rollout spec is taking over, so nothing changes silently."""
         if test_cfg.get("shuffle", False):
@@ -445,6 +466,8 @@ class Coupler:
             f"Component {name!r}: chunk_size={fsteps_per_chunk}, "
             f"num_steps={overrides['forecast']['num_steps']} (was {num_steps}), "
             f"sample_stride={sample_stride}, "
+            f"accumulate_chunks={overrides['forecast']['accumulate_chunks']}, "
+            f"num_workers={num_workers}, "
             f"output.streams={overrides['output']['streams']}"
         )
 
