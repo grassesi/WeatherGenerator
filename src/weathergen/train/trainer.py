@@ -76,10 +76,11 @@ class ChunkPlan:
 
 
 class Trainer(TrainerBase):
-    def __init__(self, train_logging: Config):
+    def __init__(self, train_logging: Config, name: str | None = None):
         TrainerBase.__init__(self)
 
         self.train_logging = train_logging
+        self.name = name
 
         self.data_loader: torch.utils.data.DataLoader | None = None
         self.data_loader_validation: torch.utils.data.DataLoader | None = None

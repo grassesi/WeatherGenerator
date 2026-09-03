@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import dataclasses
 import logging
 from pathlib import Path
@@ -7,12 +8,18 @@ from pathlib import Path
 import numpy as np
 import torch
 import tqdm
+from numpy.typing import NDArray
 from omegaconf import OmegaConf, open_dict
 
 import weathergen.common.config as config
-from weathergen.common.io import IOReaderData
 from weathergen.common.logger import init_loggers
-from weathergen.datasets.data_reader_base import DataReaderBase
+from weathergen.datasets.batch import ModelBatch
+from weathergen.datasets.data_reader_base import (
+    DataReaderBase,
+    ReaderData,
+    TimeWindowHandler,
+    TIndex,
+)
 from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
 from weathergen.train.trainer import Trainer
@@ -27,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class ModelCheckpoint:
+    component: str
     _checkpoint_str: dataclasses.InitVar[str]
     run_id: str = dataclasses.field(init=False)
     mini_epoch: int = dataclasses.field(init=False)
@@ -62,7 +70,8 @@ class ModelCheckpoint:
             options_overwrite,
         )
         cf = OmegaConf.merge(cf, shared_config)
-        return Trainer(cf.train_logging), cf
+        return Trainer(cf.train_logging, self.component), cf
+
 
 @dataclasses.dataclass
 class Coupling:
@@ -155,7 +164,7 @@ class Couplings:
     def from_args(cls, couplings: Path, components: list[str]):
         components_kv = (component.split("=") for component in components)
         components = {
-            component: ModelCheckpoint(checkpoint_str)
+            component: ModelCheckpoint(component, checkpoint_str)
             for component, checkpoint_str in components_kv
         }
 
@@ -241,7 +250,9 @@ class Coupler:
         self._components = components
         self._couplings = couplings or {}
         self._rollout = rollout
-        self._subscribers: dict[str, list[ForcingInput]] = {}
+
+        # producer -> readers waiting for its chunks
+        self._subscribers: dict[str, list[DataReaderCoupling]] = {}
 
     def trainer(self, name: str) -> Trainer:
         return self._components[name][0]
@@ -261,8 +272,8 @@ class Coupler:
             trainer.setup_inference(
                 ccf, devices, checkpoint.run_id, checkpoint.mini_epoch, name
             )
+            trainer.dynamic_forcings = self.subscribe(trainer.name, trainer.dynamic_forcings)
 
-        self._check_derivation()
         self._announce_couplings()
 
     # ------------------------------------------------------------------ checks
@@ -358,6 +369,10 @@ class Coupler:
                 # each component shuffles with its own rng_seed, so they would otherwise
                 # visit different windows
                 "shuffle": False,
+                # rollout.start_date must actually draw the first sample. The sampler
+                # otherwise substitutes the next usable window for an empty or NaN one, and
+                # does so per component, which walks two components onto different dates.
+                "strict_batches": True,
                 "forecast": {
                     "offset": rollout.forecast_offset,
                     "chunk_size": fsteps_per_chunk,
@@ -471,53 +486,50 @@ class Coupler:
             f"output.streams={overrides['output']['streams']}"
         )
 
-    def _check_derivation(self) -> None:
-        """Post-condition: the derivation really did put the components on one axis.
-
-        These can no longer fail on a user's config - they catch a bug in the derivation.
-        """
-        reference = self._names[0]
-        ref_cfg = self.trainer(reference).test_cfg
-        keys = ("start_date", "end_date", "shuffle", "samples_per_mini_epoch")
-
-        for name in self._names[1:]:
-            cfg = self.trainer(name).test_cfg
-            for key in keys:
-                if cfg.get(key) != ref_cfg.get(key):
-                    msg = (
-                        f"Derivation failed: {reference!r} and {name!r} disagree on "
-                        f"test_config.{key}: {ref_cfg.get(key)} vs {cfg.get(key)}."
-                    )
-                    raise ValueError(msg)
-
-            if cfg.forecast.offset != ref_cfg.forecast.offset:
-                msg = (
-                    f"Derivation failed: {reference!r} and {name!r} disagree on "
-                    f"test_config.forecast.offset."
-                )
-                raise ValueError(msg)
-
-        for name in self._names:
-            batch_size = self.trainer(name).batch_size_test_per_gpu
-            if batch_size != 1:
-                msg = f"Derivation failed: component {name!r} has batch size {batch_size}, not 1."
-                raise ValueError(msg)
-
     def _announce_couplings(self) -> None:
-        """A run that exchanges nothing looks exactly like one that works. Say which it is."""
-        active = [c.name for c in self._couplings.values() if c.consumer is not None]
-        logger.info(
-            f"{len(self._couplings)} coupling(s) declared, {len(active)} with a consumer. "
-            "No field is exchanged at this milestone: components run side by side and each "
-            "must reproduce its standalone output exactly."
-        )
+        """A run that exchanges nothing looks exactly like one that works. Say which it is.
+
+        Reports what the wiring actually did, not what the config asked for: a coupling only
+        takes effect if the consumer already reads that stream as a dynamic forcing, so a
+        declared consumer can substitute nothing at all.
+        """
+        # a stream is exchanged iff its reader was swapped for a coupling reader
+        exchanged: dict[str, list[str]] = {}
         for name in self._names:
             forcing = self.trainer(name).dynamic_forcings
-            if forcing is not None and not forcing.is_empty:
-                logger.info(
-                    f"Component {name!r} samples its dynamic forcings from disk, not from "
-                    f"another component: {sorted(forcing.forcing_streams)}."
+            streams = {} if forcing is None else forcing.forcing_streams
+            exchanged[name] = sorted(
+                stream
+                for stream, readers in streams.items()
+                if any(isinstance(reader, DataReaderCoupling) for reader in readers)
+            )
+
+        declared = [c for c in self._couplings.values() if c.consumer is not None]
+        live = [c for c in declared if c.stream in exchanged.get(c.consumer, [])]
+        logger.info(
+            f"{len(self._couplings)} coupling(s) declared, {len(declared)} with a consumer, "
+            f"{len(live)} actually exchanging."
+        )
+
+        for coupling in declared:
+            if coupling not in live:
+                logger.warning(
+                    f"Coupling {coupling.name!r} names {coupling.consumer!r} as the consumer "
+                    f"of '{coupling.stream}', but that component does not read that stream as "
+                    "a dynamic forcing, so nothing is substituted and the coupling has no "
+                    "effect. Use a checkpoint whose stream config sets is_dynamic_forcing."
                 )
+
+        for name in self._names:
+            forcing = self.trainer(name).dynamic_forcings
+            if forcing is None or forcing.is_empty:
+                continue
+            coupled = exchanged[name]
+            from_disk = sorted(set(forcing.forcing_streams) - set(coupled))
+            if coupled:
+                logger.info(f"Component {name!r} is forced by another component on: {coupled}.")
+            if from_disk:
+                logger.info(f"Component {name!r} samples from disk: {from_disk}.")
 
     # ------------------------------------------------------------------ driving
 
@@ -526,81 +538,43 @@ class Coupler:
         for name in self._names:
             self.trainer(name).model.eval()
 
+        # _batch_size_one derives this, and the loop below reads a batch count as a sample
+        # count, so check the post-condition rather than trusting the derivation.
+        for name in self._names:
+            batch_size = self.trainer(name).batch_size_test_per_gpu
+            if batch_size != 1:
+                msg = f"Component {name!r} has batch size {batch_size}, not 1."
+                raise ValueError(msg)
+
         iters = {name: iter(self.trainer(name).data_loader_validation) for name in self._names}
+        # len() is the per-rank batch count. samples_per_mini_epoch counts samples across all
+        # ranks, so it is not a bound on this loop; using it over-runs the loader.
         total = min(len(self.trainer(name).data_loader_validation) for name in self._names)
-        max_samples = min(
-            self.trainer(name).test_cfg.samples_per_mini_epoch for name in self._names
-        )
-        batch_size = self.trainer(self._names[0]).batch_size_test_per_gpu
         with_ddp = self.config(self._names[0]).with_ddp
 
         with torch.no_grad(), tqdm.tqdm(total=total, disable=with_ddp) as pbar:
-            bidx = 0
-            while True:
-                batches = self._next_batches(iters)
-                if batches is None:
-                    break
-
-                self._assert_aligned(batches, bidx)
-                self._run_batch(batches, bidx, mini_epoch)
-
-                pbar.update(batch_size)
-                bidx += 1
-                if (bidx * batch_size) > max_samples:
-                    break
+            for bidx in range(total):
+                self._run_batch(self._next_batches(iters), bidx, mini_epoch)
+                pbar.update(1)
 
         for name in self._names:
             self.trainer(name).finish_validation(mini_epoch)
 
-    def _next_batches(self, iters) -> dict | None:
-        """One batch per component, or None once any component is exhausted."""
+    def _next_batches(self, iters) -> dict:
+        """One batch per component."""
         batches = {}
         for name in self._names:
             try:
                 batches[name] = next(iters[name])
-            except StopIteration:
-                logger.info(f"Component {name!r} exhausted its validation set.")
-                return None
+            except StopIteration as e:
+                msg = (
+                    f"Component {name!r} ran out of batches early. Its loader declared "
+                    f"{len(self.trainer(name).data_loader_validation)} batches; the "
+                    "components are no longer on one time axis."
+                )
+                raise RuntimeError(msg) from e
 
         return batches
-
-    @staticmethod
-    def _sample_idxs(batch) -> list[int]:
-        return [
-            next(iter(sample.streams_data.values())).sample_idx
-            for sample in batch.get_source_samples().get_samples()
-        ]
-
-    def _valid_times(self, name: str, batch) -> list:
-        """Absolute start times of a batch's source windows, for this component's grid.
-
-        Sample indices are not comparable across components: each strides its own index
-        space (window(idx) = start_date + idx * time_window_step), so aligned components sit
-        at different indices that denote the same instant. Comparing the times instead is
-        both correct under striding and stricter than comparing indices ever was.
-        """
-        twh = self.trainer(name).dataset.time_window_handler
-        return [twh.window(idx).start for idx in self._sample_idxs(batch)]
-
-    def _assert_aligned(self, batches: dict, bidx: int) -> None:
-        """All components must be looking at the same time windows.
-
-        MultiStreamDataSampler.__iter__ skips empty and NaN batches independently per
-        component, so equal batch positions do not imply equal dates. The shared output
-        store keys samples by position, so a drift here would silently file two different
-        dates under one sample index.
-        """
-        reference = self._names[0]
-        ref_times = self._valid_times(reference, batches[reference])
-        for name in self._names[1:]:
-            times = self._valid_times(name, batches[name])
-            if times != ref_times:
-                msg = (
-                    f"Components drifted apart at batch {bidx}: {reference!r} is at "
-                    f"{ref_times}, {name!r} at {times}. A component skipped an empty or NaN "
-                    "batch that the others did not."
-                )
-                raise RuntimeError(msg)
 
     @staticmethod
     def _autocast(trainer: Trainer):
@@ -660,6 +634,7 @@ class Coupler:
                 with self._autocast(trainer):
                     states[name] = trainer.step_chunk(states[name], plan.chunks[i])
 
+                    self.dispatch_chunk(trainer.name, states[name], batches[name])
                     if plan.should_write_output:
                         trainer.write_chunk_output(
                             plan,
@@ -694,42 +669,308 @@ class Coupler:
 
     # -------------------------------------------------- coupling (not yet active)
 
-    def subscribe_stream(self, subscriber: ForcingInput) -> DataReaderCoupling:
-        for stream in subscriber.forcing_streams.keys():
-            self._subscribers[stream] = subscriber
+    def subscribe(
+        self,
+        consumer: str,
+        forcings: ForcingInput,
+    ) -> ForcingInput:
+        """Substitute coupling readers for the real readers of coupled streams.
 
-    def get_forcings(self, forcing_streams):
-        pass
+        Takes the forcing streams a component would read from disk, i.e. the
+        `{name: stream.readers}` mapping the Trainer builds for ForcingInput, and
+        returns the same mapping with every stream this component consumes from
+        another one backed by that component's chunks instead.
+        """
+        forcings = copy.copy(forcings)
+        forcing_streams = forcings.forcing_streams
 
-    def dispatch_chunk(self, chunk: ModelOutput):
-        pass
+        coupled = {
+            coupling.stream: coupling
+            for coupling in self._couplings.values()
+            if coupling.consumer == consumer
+        }
+
+        forcing_streams_coupled: dict[str, list[DataReaderBase]] = {}
+        # TODO move this loop to ForcingInput, move DataReaderCoupling into separate module.
+        for stream, readers in forcing_streams.items():
+            coupling = coupled.get(stream)
+            if coupling is not None:
+                forecast_step_stride = 1 # TODO determine automatically (from chunkizes)
+                reader = DataReaderCoupling(
+                    readers[0], # TODO what if multiple readers?
+                    stream,
+                    forecast_step_stride=forecast_step_stride,
+                )
+                # register coupling for producer
+                self._subscribers.setdefault(coupling.producer, []).append(reader)
+
+                logger.info(
+                    f"Stream '{stream}' of component '{consumer}' is forced by "
+                    f"component '{coupling.producer}'."
+                )
+                readers = [reader]
+
+            forcing_streams_coupled[stream] = readers
+
+        forcings.forcing_streams = forcing_streams_coupled
+        return forcings
+
+    def dispatch_chunk(self, producer: str, chunk: ModelOutput, batch: ModelBatch) -> None:
+        """Hand a finished rollout chunk to everything forced by producer.
+
+        Called once per chunk in the rollout loop, where the ModelOutput and the
+        batch it was computed from are both in scope.
+        """
+        for reader in self._subscribers.get(producer, ()):
+            reader.add_chunk(chunk, batch)
+
+
+def _to_numpy(tensor) -> NDArray:
+    """Detach a tensor to a numpy array; pass numpy arrays through."""
+    if isinstance(tensor, torch.Tensor):
+        return tensor.detach().cpu().numpy()
+    return np.asarray(tensor)
+
+
+@dataclasses.dataclass(frozen=True)
+class _PredictedWindow:
+    """One producer prediction, lowered to the data model a reader hands out.
+
+    `data` is in physical space and already ordered like the consumer's source
+    channels, so that ForcingInput can normalize it with the consumer's own
+    statistics exactly as it would normalize data read from disk.
+    """
+
+    coords: NDArray[np.float32]
+    data: NDArray[np.float32]
+    datetimes: NDArray[np.datetime64]
+
 
 class DataReaderCoupling(DataReaderBase):
-    """Implments only the interface required by ForcingInput"""
-    def __init__(self, dataset: DataReaderBase):
-        # inherit all if possible from corresponding "real" stream
-        
-        # required for tokenization
-        self.stream_info = dataset.stream_info
-        
-        # required for normalize_source_channels
-        self.source_idx
-        self.mean
-        self.stdev
-        
-        # required for normalize_geoinfos
-        self.geoinfo_idx
-        self.mean_geoinfo
-        self.stdev_geoinfo
-        
-        self._chunks: list[ModelOutput]
-    
-    def get_source(idx: int) -> IOReaderData:
-        pass
-    
-    # required for spoofing?
-    def get_geoinfo_size() -> int:
-        pass
-    
-    def add_chunk(self, chunk: ModelOutput):
-        self._chunks.append(chunk)
+    """Serve another component's predicted chunks as forcing input.
+
+    Implements only the interface required by ForcingInput: `stream_info`,
+    `get_source`, `normalize_source_channels`, `normalize_geoinfos` and
+    `get_geoinfo_size`. The consumer-side members those need (`source_idx`,
+    `mean`, `stdev`, `geoinfo_idx`, `mean_geoinfo`, `stdev_geoinfo`) are taken
+    from the consumer's own reader for the same stream, so a coupled forcing is
+    tokenized and normalized exactly like the real stream it stands in for.
+
+    Predictions arrive through `add_chunk` and are indexed by the time window
+    they are valid for. `get_source` translates the requested time index with
+    the consumer's own `TimeWindowHandler`, which keeps producer and consumer
+    aligned even when they do not share a dataset index origin. A window that
+    has not been produced (yet) reads back empty, which makes ForcingInput fall
+    back to spoofed forcing rather than fail -- the normal state at the first
+    rollout step, before the producer has run.
+    """
+
+    def __init__(
+        self,
+        dataset: DataReaderBase,
+        producer_stream: str,
+        producer: DataReaderBase | None = None,
+        producer_time_window_handler: TimeWindowHandler | None = None,
+        forecast_step_stride: int = 1,
+        max_pending_windows: int = 64,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        dataset :
+            The consumer's own reader for this stream. Supplies the tokenization
+            and normalization context the prediction has to be dressed up in.
+        producer_stream :
+            Name the stream carries in the producing component, i.e. the key its
+            predictions are stored under in `ModelOutput.physical`.
+        producer :
+            The producing component's reader for the stream, used to bring its
+            predictions back to physical space. If omitted, producer and consumer
+            are assumed to share statistics for these channels.
+        producer_time_window_handler :
+            The producing component's time window handler. Defaults to the
+            consumer's, i.e. both components walk the same timeline.
+        forecast_step_stride :
+            Dataset indices advanced per forecast step on the producer side,
+            `forecast.time_step // time_window_step` of the producing sampler.
+        max_pending_windows :
+            Number of predicted windows kept before the oldest ones are dropped.
+
+        Returns
+        -------
+        None
+        """
+
+        super().__init__(dataset.time_window_handler, dataset.stream_info)
+
+        self._producer_stream = producer_stream
+        self._producer_twh = producer_time_window_handler or dataset.time_window_handler
+        self._stride = int(forecast_step_stride)
+        self._max_pending = int(max_pending_windows)
+        self._length = dataset.length()
+
+        # consumer side: how ForcingInput will tokenize and normalize what we return
+        self.source_channels = list(dataset.source_channels)
+        self.source_idx = list(dataset.source_idx)
+        self.geoinfo_channels = list(dataset.geoinfo_channels)
+        self.geoinfo_idx = list(dataset.geoinfo_idx)
+        self.mean = dataset.mean
+        self.stdev = dataset.stdev
+        self.mean_geoinfo = dataset.mean_geoinfo
+        self.stdev_geoinfo = dataset.stdev_geoinfo
+
+        # a coupled forcing stream is never a prediction target of its consumer
+        self.target_channels = []
+        self.target_idx = []
+        self.target_channel_weights = []
+
+        # geoinfos are not predicted; hand out the climatological mean so that the
+        # consumer's normalization maps them to zero
+        self._geoinfo_fill = np.asarray(self.mean_geoinfo, dtype=np.float32).reshape(1, -1)
+
+        # producer side: which prediction columns to take and how to denormalize them
+        if producer is None:
+            producer_channels, producer_idx, stats = (
+                list(dataset.source_channels),
+                list(dataset.source_idx),
+                dataset,
+            )
+        else:
+            producer_channels, producer_idx, stats = (
+                list(producer.target_channels),
+                list(producer.target_idx),
+                producer,
+            )
+
+        missing = [ch for ch in self.source_channels if ch not in producer_channels]
+        if missing:
+            raise ValueError(
+                f"Coupled stream '{producer_stream}' does not predict the channels its consumer "
+                f"needs as forcing: missing {missing}, predicted {producer_channels}."
+            )
+
+        self._pred_cols = np.asarray(
+            [producer_channels.index(ch) for ch in self.source_channels], dtype=np.int64
+        )
+        chs = [producer_idx[col] for col in self._pred_cols]
+        self._pred_mean = np.asarray([stats.mean[ch] for ch in chs], dtype=np.float32)
+        self._pred_stdev = np.asarray([stats.stdev[ch] for ch in chs], dtype=np.float32)
+
+        self._windows: dict[np.datetime64, _PredictedWindow] = {}
+
+    def length(self) -> int:
+        """Length of the timeline this reader is defined on, not of what it holds."""
+        return self._length
+
+    def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
+        raise NotImplementedError(
+            "DataReaderCoupling serves predicted chunks, not stored data; use get_source()."
+        )
+
+    def get_source(self, idx: TIndex) -> ReaderData:
+        """
+        Get the prediction valid for time window idx
+
+        Parameters
+        ----------
+        idx : int
+            Index of temporal window
+
+        Returns
+        -------
+        source data, empty if no chunk covering idx has been dispatched yet
+        """
+
+        valid_time = self.time_window_handler.window(idx).start
+        window = self._windows.get(valid_time)
+
+        if window is None:
+            logger.debug(
+                f"No chunk for stream '{self._producer_stream}' at {valid_time} (index {idx}), "
+                "forcing falls back to spoof."
+            )
+            return ReaderData.empty(len(self.source_idx), len(self.geoinfo_idx))
+
+        # ForcingInput normalizes in place, so never hand out the stored arrays
+        return ReaderData(
+            coords=window.coords.copy(),
+            geoinfos=np.tile(self._geoinfo_fill, (len(window.data), 1)),
+            data=window.data.copy(),
+            datetimes=window.datetimes.copy(),
+            is_spoof=False,
+        )
+
+    def add_chunk(self, chunk: ModelOutput, batch: ModelBatch) -> None:
+        """Index the predictions of one rollout chunk by the time they are valid for.
+
+        `batch` is needed because a ModelOutput only carries the source samples,
+        while the coordinates and times the predictions live on sit on the
+        target samples.
+        """
+
+        for fstep in chunk.forecast_steps:
+            preds = chunk.get_physical_prediction(chunk.chunk_idx(fstep), self._producer_stream)
+            if preds is None:
+                # leading empty steps of the first chunk, or a stream without a decoder
+                continue
+
+            for i_source, pred in enumerate(preds):
+                entry = self._lower_prediction(chunk.batch_idx(fstep), i_source, pred, batch)
+                if entry is not None:
+                    valid_time, window = entry
+                    self._windows[valid_time] = window
+
+        self._evict()
+
+    def _lower_prediction(
+        self, fstep: int, i_source: int, pred: torch.Tensor, batch: ModelBatch
+    ) -> tuple[np.datetime64, _PredictedWindow] | None:
+        """Pair one prediction with its target geometry and bring it to physical space."""
+
+        i_target = batch.get_target_idx_for_source(i_source)
+        stream_data = batch.get_target_sample(i_target).streams_data.get(self._producer_stream)
+        if stream_data is None:
+            return None
+
+        # spoofed steps carry made-up geometry, forcing on them would be worse than spoofing
+        if stream_data.is_spoof(fstep):
+            return None
+
+        coords = _to_numpy(stream_data.target_coords_raw[fstep])
+        times = np.asarray(stream_data.target_times_raw[fstep])
+        if len(coords) == 0:
+            return None
+
+        # ensemble members are equivalent forcings, use their mean
+        data = pred.mean(dim=0).to(torch.float32).detach().cpu().numpy()
+
+        assert data.shape[0] == coords.shape[0] == times.shape[0], (
+            f"Prediction for '{self._producer_stream}' at step {fstep} has {data.shape[0]} points "
+            f"but {coords.shape[0]} coordinates and {times.shape[0]} times."
+        )
+
+        # restore the ordering of the original data, as the output writer does
+        idxs_inv = stream_data.idxs_inv[fstep]
+        if idxs_inv is not None and len(idxs_inv) > 0:
+            idxs_inv = _to_numpy(idxs_inv)
+            data, coords, times = data[idxs_inv], coords[idxs_inv], times[idxs_inv]
+
+        # select the channels the consumer expects and denormalize them
+        data = data[:, self._pred_cols] * self._pred_stdev + self._pred_mean
+
+        valid_idx = stream_data.sample_idx + fstep * self._stride
+        valid_time = self._producer_twh.window(valid_idx).start
+
+        return valid_time, _PredictedWindow(
+            coords=coords.astype(np.float32),
+            data=data.astype(np.float32),
+            datetimes=times.astype("datetime64[ns]"),
+        )
+
+    def _evict(self) -> None:
+        """Drop the oldest windows once more than max_pending_windows are held."""
+        excess = len(self._windows) - self._max_pending
+        if excess <= 0:
+            return
+        for valid_time in sorted(self._windows)[:excess]:
+            del self._windows[valid_time]

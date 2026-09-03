@@ -825,6 +825,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
                 # skip completely empty batch item or when all targets are empty -> no grad
                 if not_valid:
+                    if self.mode_cfg.get("strict_batches", False):
+                        msg = (
+                            f"Empty or NaN batch at idx={idx} "
+                            f"({self.time_window_handler.window(idx).start}). "
+                            "test_config.strict_batches is set, so the sample this index "
+                            "names cannot be substituted with a later one."
+                        )
+                        raise RuntimeError(msg)
                     logger.warning(f"Skipping empty batch with idx={idx}.")
                 else:
                     break
