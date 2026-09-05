@@ -79,6 +79,9 @@ class Coupling:
 
     consumer is None while the components only run side by side, which is what lets the
     interleaving be exercised before any field is actually exchanged.
+
+    Every coupling is optional: one that names a stream its producer does not carry is
+    dropped rather than fataly
     """
 
     name: str
@@ -279,8 +282,12 @@ class Coupler:
     # ------------------------------------------------------------------ checks
 
     def _check_couplings(self) -> None:
-        """Coupling names must resolve, and each stream may have only one producer."""
+        """Coupling names must resolve, and each stream may have only one producer.
+
+        A coupling whose producer does not carry the stream is dropped rather than rejected.
+        """
         producers: dict[str, str] = {}
+        live: dict[str, Coupling] = {}
         for coupling in self._couplings.values():
             if coupling.producer not in self._components:
                 msg = (
@@ -298,11 +305,13 @@ class Coupler:
 
             streams = self.config(coupling.producer).streams
             if coupling.stream not in streams:
-                msg = (
-                    f"Coupling {coupling.name!r} uses stream {coupling.stream!r}, which its "
-                    f"producer {coupling.producer!r} does not have."
+                logger.warning(
+                    f"Coupling {coupling.name!r} dropped: its producer "
+                    f"{coupling.producer!r} has no stream {coupling.stream!r}. Expected when "
+                    "one couplings file covers several component pairs; check the stream "
+                    "name if this pair was meant to exchange it."
                 )
-                raise ValueError(msg)
+                continue
 
             # one producer per stream keeps the shared output store collision-free by
             # construction, rather than by asking the configs to be disjoint
@@ -314,6 +323,9 @@ class Coupler:
                 )
                 raise ValueError(msg)
             producers[coupling.stream] = coupling.name
+            live[coupling.name] = coupling
+
+        self._couplings = live
 
     def _produced_streams(self, name: str) -> list[str]:
         """Streams this component is the producer of, in declaration order."""

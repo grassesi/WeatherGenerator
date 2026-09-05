@@ -11,12 +11,16 @@
 The entry point for training and inference weathergen-atmo
 """
 
+import argparse
 import logging
 import os
 import pdb
 import sys
 import time
 import traceback
+from pathlib import Path
+
+from omegaconf import DictConfig, OmegaConf
 
 import weathergen.common.config as config
 import weathergen.utils.cli as cli
@@ -48,16 +52,10 @@ def main(argl: list[str]):
     except ValueError as e:
         logger.error(str(e))
 
+    argl = _fix_argl_coupled_inference(argl)
+
     parser = cli.get_main_parser()
-    try:
-        args = parser.parse_args(argl)
-    except Exception:  # catch parser error
-        if argl[0] == cli.Stage.inference:
-            logger.info(
-                "Failed first attempt at parsing inference args. \
-                Trying to parse args for coupled inference."
-            )
-            argl[0] = cli.Stage.coupled_inference
+    args = parser.parse_args(argl)
 
     match args.stage:
         case cli.Stage.train:
@@ -87,6 +85,129 @@ def _fix_argl(argl):  # TODO remove this fix after grace period
         argl = [stage] + argl
 
     return argl
+
+
+# The keys an inference stage carries to mean "this is really a coupled run". They are the
+# two positional arguments of the coupled_inference parser, passed as options instead.
+_COUPLED_KEYS = ("couplings", "components")
+
+# Model loading flags that inference requires and coupled inference has no parser entry for:
+# every component names its own checkpoint in `components`, so these are dropped, not mapped.
+# Maps flag -> number of values it consumes.
+_INFERENCE_ONLY_FLAGS = {
+    "--from-run-id": 1,
+    "-id": 1,
+    "--mini-epoch": 1,
+    "-e": 1,
+    "--reuse-run-id": 0,
+}
+
+
+def _fix_argl_coupled_inference(argl: list[str]) -> list[str]:
+    """Rewrite an `inference` invocation carrying coupling options into a coupled one."""
+
+    if not argl or argl[0] != cli.Stage.inference:
+        return argl
+
+    couplings, components = _peek_coupled_options(argl[1:])
+
+    if couplings is None and components is None:
+        return argl
+
+    logger.info(
+        f"Coupling options found ({_COUPLED_KEYS[0]}={couplings}, "
+        f"{_COUPLED_KEYS[1]}={components}); dispatching to {cli.Stage.coupled_inference}."
+    )
+
+    rest = _drop_flags(argl[1:], _INFERENCE_ONLY_FLAGS)
+
+    return [cli.Stage.coupled_inference, couplings, *components, *rest]
+
+
+def _peek_coupled_options(args: list[str]) -> tuple[str | None, list[str] | None]:
+    """Read the coupling keys out of an inference arglist"""
+
+    parser = argparse.ArgumentParser(allow_abbrev=False, add_help=False)
+    parser.add_argument("--config", type=Path, nargs="*", default=[])
+    parser.add_argument("--options", nargs="+", default=[])
+    known, _ = parser.parse_known_args(args)
+
+    found: dict[str, object] = {}
+
+    sources = []
+    for path in known.config:
+        try:
+            sources.append(OmegaConf.load(path))
+        except Exception as e:  # a broken or missing config is the config loader's to report
+            logger.debug(f"Could not peek at config {path} for coupling options: {e}")
+    if known.options:
+        sources.append(OmegaConf.from_dotlist(known.options))
+
+    for source in sources:
+        if not isinstance(source, DictConfig):
+            continue
+        for key in _COUPLED_KEYS:
+            if source.get(key) is not None:
+                found[key] = source.get(key)
+
+    couplings = found.get(_COUPLED_KEYS[0])
+    components = found.get(_COUPLED_KEYS[1])
+
+    return (
+        None if couplings is None else str(couplings),
+        None if components is None else _split_components(components),
+    )
+
+
+def _split_components(value) -> list[str]:
+    """Normalize the `components` option into the argv entries the coupled parser takes.
+
+    Accepts the whitespace or comma separated string a dotlist option produces
+    (`components="Atmo=a@16 Ocean=b@16"`) as well as a yaml list, since both survive the
+    launcher's round trip through `config_command_line.yaml`.
+    """
+
+    if isinstance(value, str):
+        entries = value.replace(",", " ").split()
+    else:
+        entries = [str(entry) for entry in value]
+
+    if not entries:
+        msg = "The 'components' option is empty; coupled inference needs at least one component."
+        raise ValueError(msg)
+
+    for entry in entries:
+        name, _, checkpoint = entry.partition("=")
+        if not name or "@" not in checkpoint:
+            msg = (
+                f"Coupled inference component {entry!r} is malformed. Expected "
+                "'<Component>=<run_id>@<mini_epoch>', e.g. 'Atmo=zhyqsbi8@16'."
+            )
+            raise ValueError(msg)
+
+    return entries
+
+
+def _drop_flags(args: list[str], flags: dict[str, int]) -> list[str]:
+    """Remove `flags` and the values they consume from an arglist, `--flag=value` included."""
+
+    kept: list[str] = []
+    skip = 0
+
+    for arg in args:
+        if skip:
+            skip -= 1
+            continue
+
+        name = arg.split("=", 1)[0]
+        if name in flags:
+            if "=" not in arg:
+                skip = flags[name]
+            continue
+
+        kept.append(arg)
+
+    return kept
 
 
 def run_inference(args):
