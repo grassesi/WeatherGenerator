@@ -94,8 +94,6 @@ def test_empty_windows_are_held():
     for idx in range(CADENCE):
         assert reader.get_source(np.int64(idx)).data[0, 0] == pytest.approx(7.0)
 
-    assert reader.held_windows == CADENCE - 1
-
 
 def test_target_is_not_held():
     reader = make_reader()

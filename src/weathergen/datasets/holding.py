@@ -73,7 +73,6 @@ class HoldingReader(DataReaderBase):
 
         self._wrapped_reader = wrapped_reader
         self._max_hold = int(max_hold)
-        self._held = 0
 
         super().__init__(wrapped_reader.time_window_handler, wrapped_reader.stream_info)
 
@@ -150,11 +149,6 @@ class HoldingReader(DataReaderBase):
             "This is a decorator use the public interface (get_source / get_target)"
         )
 
-    @property
-    def held_windows(self) -> int:
-        """How many windows this reader has filled by holding, over its lifetime."""
-        return self._held
-
     def _hold(self, idx: TIndex, read) -> ReaderData:
         """Return the window at idx, or the most recent non-empty one within max_hold."""
 
@@ -171,7 +165,6 @@ class HoldingReader(DataReaderBase):
             if rdata.is_empty():
                 continue
 
-            self._held += 1
             _logger.debug(
                 f"Holding stream '{self.stream_info.get('name')}' at window {idx} from "
                 f"window {previous} ({back} window(s) back)."
