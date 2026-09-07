@@ -21,10 +21,12 @@ import logging
 import typing
 
 import numpy as np
+from numpy.typing import NDArray
 
 from weathergen.datasets.data_reader_base import (
     NPDT64,
     DataReaderBase,
+    DType,
     NPTDel64,
     ReaderData,
     TIndex,
@@ -151,9 +153,9 @@ class ElevatingReader(DataReaderBase):
 
         super().__init__(wrapped_reader.time_window_handler, wrapped_reader.stream_info)
 
-        # These have to be set on the instance rather than reached through __getattr__: the
-        # ABCMeta in utils.better_abc walks dir() after construction and refuses to instantiate
-        # while any of them still resolves to the abstract placeholder on the base class.
+        # These have to be copied onto the instance rather than read off the wrapped reader on
+        # demand: the ABCMeta in utils.better_abc walks dir() after construction and refuses to
+        # instantiate while any of them still resolves to the abstract placeholder on the base.
         self.source_channels = wrapped_reader.source_channels
         self.target_channels = wrapped_reader.target_channels
         self.geoinfo_channels = wrapped_reader.geoinfo_channels
@@ -203,20 +205,6 @@ class ElevatingReader(DataReaderBase):
                     f"{elevation.offset} from {elevation.from_time}."
                 )
 
-    def __getattr__(self, name: str):
-        """
-        Delegate anything not set here to the wrapped reader.
-
-        Readers carry state the base interface does not describe (colnames on the observation
-        reader, data_start_time and period on the timestep readers, the separate source/target
-        statistics on fesom). Forwarding keeps the wrapper transparent to whoever needs them.
-        Only reached for names that are not found on this instance or its class.
-        """
-        if name.startswith("_"):
-            # Guards against recursion before _wrapped_reader is assigned.
-            raise AttributeError(name)
-        return getattr(self._wrapped_reader, name)
-
     @typing.override
     def length(self) -> int:
         return self._wrapped_reader.length()
@@ -235,18 +223,40 @@ class ElevatingReader(DataReaderBase):
         rdata = self._wrapped_reader.get_target(idx)
         return self._elevate(rdata, self.target_idx, self._target_elevations, idx)
 
+    # Normalization is forwarded rather than inherited. The base implementations work off
+    # self.mean/self.stdev, but fesom, mesh and cams each normalize with statistics or
+    # transforms of their own; inheriting resolves on this class and silently shadows them.
+    # The offset is added in physical units, so the wrapped reader's normalization is exactly
+    # the one that should be applied on top of it.
+
+    @typing.override
+    def normalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
+        return self._wrapped_reader.normalize_source_channels(source)
+
+    @typing.override
+    def normalize_target_channels(self, target: NDArray[DType]) -> NDArray[DType]:
+        return self._wrapped_reader.normalize_target_channels(target)
+
+    @typing.override
+    def denormalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
+        return self._wrapped_reader.denormalize_source_channels(source)
+
+    @typing.override
+    def denormalize_target_channels(self, data: NDArray[DType]) -> NDArray[DType]:
+        return self._wrapped_reader.denormalize_target_channels(data)
+
+    @typing.override
+    def normalize_geoinfos(self, geoinfos: NDArray[DType]) -> NDArray[DType]:
+        return self._wrapped_reader.normalize_geoinfos(geoinfos)
+
     @typing.override
     def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
-        # Delegating to the wrapped reader rather than to super() keeps the offset applied
-        # exactly once no matter which of the three entry points a caller uses.
-        rdata = self._wrapped_reader._get(idx, channels_idx)
-        return self._elevate(rdata, channels_idx, self._elevations_for(channels_idx), idx)
-
-    def _elevations_for(self, channels_idx: list[int]) -> dict[int, Elevation]:
-        """Pick the schedule matching a raw channel selection, see the note in __init__."""
-        if list(channels_idx) == list(self.target_idx):
-            return self._target_elevations
-        return self._source_elevations
+        # Elevation is scheduled per side, and a raw channel selection does not say which side
+        # it came from. get_source and get_target are both overridden, so nothing reaches this;
+        # the base declares it abstract, so it still has to exist.
+        raise NotImplementedError(
+            "ElevatingReader elevates per side; use get_source() or get_target()."
+        )
 
     def _elevate(
         self,
@@ -271,8 +281,11 @@ class ElevatingReader(DataReaderBase):
 
         # Copy rather than write in place: a reader is free to hand back a view into a buffer it
         # keeps, and an in-place addition would corrupt it and compound over reads.
-        rdata.data = rdata.data.copy()
-        for pos, offset in active:
-            rdata.data[:, pos] += offset
+        positions = np.fromiter((pos for pos, _ in active), dtype=np.intp, count=len(active))
+        offsets = np.fromiter(
+            (offset for _, offset in active), dtype=rdata.data.dtype, count=len(active)
+        )
+        data = rdata.data.copy()
+        data[:, positions] += offsets
 
-        return rdata
+        return dataclasses.replace(rdata, data=data)
