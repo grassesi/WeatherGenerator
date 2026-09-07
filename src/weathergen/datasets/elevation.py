@@ -223,12 +223,6 @@ class ElevatingReader(DataReaderBase):
         rdata = self._wrapped_reader.get_target(idx)
         return self._elevate(rdata, self.target_idx, self._target_elevations, idx)
 
-    # Normalization is forwarded rather than inherited. The base implementations work off
-    # self.mean/self.stdev, but fesom, mesh and cams each normalize with statistics or
-    # transforms of their own; inheriting resolves on this class and silently shadows them.
-    # The offset is added in physical units, so the wrapped reader's normalization is exactly
-    # the one that should be applied on top of it.
-
     @typing.override
     def normalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
         return self._wrapped_reader.normalize_source_channels(source)
@@ -251,11 +245,8 @@ class ElevatingReader(DataReaderBase):
 
     @typing.override
     def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
-        # Elevation is scheduled per side, and a raw channel selection does not say which side
-        # it came from. get_source and get_target are both overridden, so nothing reaches this;
-        # the base declares it abstract, so it still has to exist.
         raise NotImplementedError(
-            "ElevatingReader elevates per side; use get_source() or get_target()."
+            "This is a decorator use the public interface (get_source / get_target)"
         )
 
     def _elevate(
