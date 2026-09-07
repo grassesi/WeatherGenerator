@@ -1,6 +1,0 @@
-training_config:
-  start_date: 1979-01-01T00:00
-  forecast :
-    offset: 1
-    num_steps: 4 # reduce finetuning to 8 steps to prevent smoothing due to double penalty.
-    policy: "fixed"
