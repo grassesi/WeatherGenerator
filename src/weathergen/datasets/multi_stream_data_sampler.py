@@ -32,6 +32,7 @@ from weathergen.datasets.elevation import ElevatingReader
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
+from weathergen.datasets.upsampling import UpsamplingReader
 from weathergen.datasets.utils import (
     get_tokens_lens,
 )
@@ -81,8 +82,11 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
         rdata = (
             get_reader_data(idx).shuffle(rng, shuffle, num_subset).remove_nan_coords_and_geoinfos()
         )
-        rdata.data = normalize_channels(rdata.data)
-        rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
+        rdata = dataclasses.replace(
+            rdata,
+            data=normalize_channels(rdata.data),
+            geoinfos=ds.normalize_geoinfos(rdata.geoinfos),
+        )
         rdatas += [rdata]
 
     return IOReaderData.combine(rdatas)
@@ -289,6 +293,10 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 ds = dataset(filename=filename, **kwargs)
                 if stream_info.get("average_window", False):
                     ds = AveragingReader(ds)
+                if stream_info.get("upsample", False):
+                    ds = UpsamplingReader(ds)
+                # outermost, so a scheduled offset is applied at the time of the window being
+                # served rather than at the time of the source sample it was upsampled from
                 if stream_info.get("elevation", None):
                     ds = ElevatingReader(
                         ds, self.time_window_handler.t_start, self._forecast_time_step()
