@@ -1,5 +1,7 @@
 """Contract of DataReaderCoupling: the subset of the reader interface ForcingInput uses."""
 
+import dataclasses
+
 import numpy as np
 import pytest
 import torch
@@ -9,6 +11,7 @@ from weathergen.common.coupling import Coupler, Coupling, DataReaderCoupling
 from weathergen.datasets.batch import ModelBatch, SampleMetaData
 from weathergen.datasets.data_reader_base import DataReaderBase, TimeWindowHandler
 from weathergen.datasets.stream_data import StreamData
+from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
 
 STREAM = "ERA5-Ocean"
@@ -96,8 +99,11 @@ def collect(reader: DataReaderCoupling, idx: int):
     """The call sequence ForcingInput._collect_forcing_data runs on a reader."""
     rdata = reader.get_source(np.int64(idx)).shuffle(None, False, -1)
     rdata = rdata.remove_nan_coords_and_geoinfos()
-    rdata.data = reader.normalize_source_channels(rdata.data)
-    rdata.geoinfos = reader.normalize_geoinfos(rdata.geoinfos)
+    rdata = dataclasses.replace(
+        rdata,
+        data=reader.normalize_source_channels(rdata.data),
+        geoinfos=reader.normalize_geoinfos(rdata.geoinfos),
+    )
     return rdata
 
 
@@ -181,16 +187,27 @@ def test_missing_producer_channel_is_reported(consumer, time_window_handler):
         DataReaderCoupling(consumer, STREAM, producer=producer)
 
 
-def test_coupler_substitutes_only_coupled_streams(consumer, chunk):
-    coupler = Coupler({"c": Coupling(name="c", producer="atmo", consumer="ocean", stream=STREAM)})
+def test_coupler_substitutes_only_coupled_streams(consumer, chunk, time_window_handler):
+    # components first, couplings second: this driver owns the components too
+    coupler = Coupler(
+        {}, {"c": Coupling(name="c", producer="atmo", consumer="ocean", stream=STREAM)}
+    )
+    forcings = ForcingInput(
+        "validation",
+        time_window_handler,
+        {STREAM: [consumer], "era5": [consumer]},
+        tokenizer=None,
+    )
 
-    forcings = coupler.get_forcings("ocean", {STREAM: [consumer], "era5": [consumer]})
+    subscribed = coupler.subscribe("ocean", forcings)
+    streams = subscribed.forcing_streams
 
-    assert isinstance(forcings[STREAM][0], DataReaderCoupling)
-    assert forcings["era5"][0] is consumer
+    assert isinstance(streams[STREAM][0], DataReaderCoupling)
+    # a stream no coupling names is left on its own reader
+    assert streams["era5"][0] is consumer
 
     coupler.dispatch_chunk("atmo", *chunk)
-    assert not forcings[STREAM][0].get_source(np.int64(SAMPLE_IDX + FSTEPS[0])).is_empty()
+    assert not streams[STREAM][0].get_source(np.int64(SAMPLE_IDX + FSTEPS[0])).is_empty()
 
     # a producer nothing is subscribed to is a no-op, not an error
     coupler.dispatch_chunk("nobody", *chunk)

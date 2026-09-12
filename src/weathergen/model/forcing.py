@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import itertools as it
 from typing import Any
 
@@ -253,8 +254,11 @@ class ForcingInput:
                 .shuffle(None, shuffle, -1)
                 .remove_nan_coords_and_geoinfos()
             )
-            rdata.data = file_reader.normalize_source_channels(rdata.data)
-            rdata.geoinfos = file_reader.normalize_geoinfos(rdata.geoinfos)
+            rdata = dataclasses.replace(
+                rdata,
+                data=file_reader.normalize_source_channels(rdata.data),
+                geoinfos=file_reader.normalize_geoinfos(rdata.geoinfos),
+            )
             rdatas.append(rdata)
 
         combined_data = IOReaderData.combine(rdatas)
