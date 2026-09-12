@@ -11,6 +11,7 @@ from weathergen.common.coupling import Coupler, Coupling, DataReaderCoupling
 from weathergen.datasets.batch import ModelBatch, SampleMetaData
 from weathergen.datasets.data_reader_base import DataReaderBase, TimeWindowHandler
 from weathergen.datasets.stream_data import StreamData
+from weathergen.model.chunking import ChunkInfo
 from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
 
@@ -86,7 +87,8 @@ def chunk(coords) -> tuple[ModelOutput, ModelBatch]:
     batch.add_source_stream(0, 0, STREAM, source, SampleMetaData(params={}, mask=None))
     batch.add_target_stream(0, 0, STREAM, target, SampleMetaData(params={}, mask=None))
 
-    output = ModelOutput(FSTEPS, FORECAST_OFFSET, batch.get_source_samples())
+    tile = ChunkInfo.tiles(FSTEPS, len(FSTEPS))[0]
+    output = ModelOutput(tile, batch.get_source_samples())
     for fstep in FSTEPS:
         # normalized prediction, constant per step so it is easy to check
         pred = torch.full((1, N_POINTS, 2), float(fstep), dtype=torch.float32)

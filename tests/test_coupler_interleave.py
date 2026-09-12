@@ -28,6 +28,7 @@ from omegaconf import OmegaConf
 import weathergen.common.config as config
 from weathergen.common.coupling import Coupler, Coupling, ModelCheckpoint, Rollout
 from weathergen.datasets.data_reader_base import TimeWindowHandler
+from weathergen.model.chunking import ChunkInfo
 from weathergen.train.trainer import ChunkPlan, Trainer
 from weathergen.train.utils import resolve_stage_configs
 
@@ -121,17 +122,19 @@ class FakeTrainer:
         self.finished = False
 
     def prepare_chunks(self, batch, mode_cfg, batch_size, bidx, targets_and_auxs):
+        output_idxs = list(range(self._n_chunks))
         return ChunkPlan(
-            output_idxs=list(range(self._n_chunks)),
-            chunks=[[i] for i in range(self._n_chunks)],
+            output_idxs=output_idxs,
+            tiles=ChunkInfo.tiles(output_idxs, 1),
+            whole=ChunkInfo.whole(output_idxs, 1),
             should_write_output=self._write,
             should_accumulate_chunks=self._accumulate,
             denormalize_data_fct=None,
         )
 
     def step_chunk(self, forecast_chunk, chunk):
-        self.steps.append(chunk[0])
-        return FakeOutput(f"{self.name}{chunk[0]}")
+        self.steps.append(chunk.steps[0])
+        return FakeOutput(f"{self.name}{chunk.steps[0]}")
 
     def write_chunk_output(self, plan, mode_cfg, batch_size, mini_epoch, bidx, batch, out, targets):
         self.writes.append(out.tag)
@@ -224,7 +227,7 @@ def test_chunks_are_interleaved_not_run_to_completion(no_autocast):
         original = trainer.step_chunk
 
         def traced(fc, chunk, _t=trainer, _o=original):
-            order.append((_t.name, chunk[0]))
+            order.append((_t.name, chunk.steps[0]))
             return _o(fc, chunk)
 
         trainer.step_chunk = traced
@@ -558,7 +561,7 @@ def make_real_trainer(chunk_size, num_samples=0, accumulate=True):
     trainer.dynamic_forcings = None
     denormalize = staticmethod(lambda *a: a)
     trainer.dataset_val = type("DS", (), {"denormalize_target_channels": denormalize})()
-    trainer.model = lambda params, fc, chunk, forcings: FakeOutput(f"c{chunk[0]}")
+    trainer.model = lambda params, fc, chunk, forcings: FakeOutput(f"c{chunk.steps[0]}")
     mode_cfg = OmegaConf.create(
         {
             "forecast": {"chunk_size": chunk_size, "accumulate_chunks": accumulate},
@@ -572,7 +575,7 @@ def test_single_model_path_steps_every_chunk():
     trainer, mode_cfg = make_real_trainer(chunk_size=2, accumulate=False)
     batch = BatchWithSteps([0, 1, 2, 3, 4])
     seen = []
-    trainer.step_chunk = lambda fc, chunk: seen.append(list(chunk)) or FakeOutput("x")
+    trainer.step_chunk = lambda fc, chunk: seen.append(list(chunk.steps)) or FakeOutput("x")
 
     result = trainer._process_validation_chunks(batch, mode_cfg, 1, 0, 0, {})
 
@@ -585,14 +588,14 @@ def test_single_model_path_accumulates_in_chunk_order():
     batch = BatchWithSteps([0, 1, 2])
     captured = {}
     trainer.assemble_chunks = lambda plan, physical, latent, b: captured.update(
-        physical=list(physical), latent=list(latent), chunks=plan.chunks
+        physical=list(physical), latent=list(latent), chunks=[t.steps for t in plan.tiles]
     )
 
     trainer._process_validation_chunks(batch, mode_cfg, 1, 0, 0, {})
 
     assert captured["physical"] == ["c0", "c1", "c2"]
     assert captured["latent"] == ["c0", "c1", "c2"]
-    assert captured["chunks"] == [[0], [1], [2]]
+    assert captured["chunks"] == [(0,), (1,), (2,)]
 
 
 def test_single_model_path_defaults_to_one_chunk():
@@ -601,7 +604,7 @@ def test_single_model_path_defaults_to_one_chunk():
     del mode_cfg.forecast.chunk_size
     batch = BatchWithSteps([0, 1, 2, 3])
     seen = []
-    trainer.step_chunk = lambda fc, chunk: seen.append(list(chunk)) or FakeOutput("x")
+    trainer.step_chunk = lambda fc, chunk: seen.append(list(chunk.steps)) or FakeOutput("x")
 
     trainer._process_validation_chunks(batch, mode_cfg, 1, 0, 0, {})
 

@@ -22,6 +22,7 @@ from weathergen.datasets.data_reader_base import (
 )
 from weathergen.datasets.holding import HoldingReader
 from weathergen.datasets.tokenizer_utils import encode_times_target
+from weathergen.model.chunking import ChunkInfo
 from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
 from weathergen.train.trainer import Trainer
@@ -674,15 +675,15 @@ class Coupler:
             accumulated[name] = ([], [])
 
         # interleave: every component advances one chunk before any advances two
-        for i in range(max(len(plan.chunks) for plan in plans.values())):
+        for i in range(max(len(plan.tiles) for plan in plans.values())):
             for name in self._names:
                 plan = plans[name]
-                if i >= len(plan.chunks):
+                if i >= len(plan.tiles):
                     continue
 
                 trainer = self.trainer(name)
                 with self._autocast(trainer):
-                    states[name] = trainer.step_chunk(states[name], plan.chunks[i])
+                    states[name] = trainer.step_chunk(states[name], plan.tiles[i])
 
                     self.dispatch_chunk(trainer.name, states[name], batches[name])
                     if plan.should_write_output:
@@ -1131,6 +1132,8 @@ class DataReaderCoupling(DataReaderBase):
         target samples.
         """
 
+        tile = self._producer_tile(chunk)
+
         for fstep in chunk.forecast_steps:
             preds = chunk.get_physical_prediction(chunk.chunk_idx(fstep), self._producer_stream)
             if preds is None:
@@ -1138,15 +1141,38 @@ class DataReaderCoupling(DataReaderBase):
                 continue
 
             for i_source, pred in enumerate(preds):
-                entry = self._lower_prediction(chunk.batch_idx(fstep), i_source, pred, batch)
+                entry = self._lower_prediction(
+                    chunk.batch_idx(fstep), i_source, pred, batch, tile
+                )
                 valid_time, window = entry
                 self._windows[valid_time] = window
 
         self._dispatched += 1
         self._evict()
 
+    def _producer_tile(self, chunk: ModelOutput) -> ChunkInfo | None:
+        """The producer's own description of the chunk it just emitted.
+
+        The timeline a prediction is stamped on and the stride between its forecast steps
+        belong to the *producing* component. They used to be constructor arguments of this
+        reader, which is how they came to be left unset: `subscribe()` fills three of six.
+        Riding along inside the ModelOutput, they cannot be forgotten -- so prefer them, and
+        fall back to what the constructor was given only when a chunk carries no tile.
+        """
+
+        tile = getattr(chunk, "chunk", None)
+        if tile is None or tile.time_window_handler is None:
+            return None
+
+        return tile
+
     def _lower_prediction(
-        self, fstep: int, i_source: int, pred: torch.Tensor, batch: ModelBatch
+        self,
+        fstep: int,
+        i_source: int,
+        pred: torch.Tensor,
+        batch: ModelBatch,
+        tile: ChunkInfo | None = None,
     ) -> tuple[np.datetime64, ReaderData]:
         """Pair one prediction with its target geometry and bring it to physical space."""
 
@@ -1181,8 +1207,12 @@ class DataReaderCoupling(DataReaderBase):
         # select the channels the consumer expects and denormalize them
         data = data[:, self._pred_cols] * self._pred_stdev + self._pred_mean
 
-        valid_idx = stream_data.sample_idx + fstep * self._stride
-        valid_time = self._producer_twh.window(valid_idx).start
+        if tile is not None:
+            valid_idx = tile.window_idx(stream_data.sample_idx, fstep)
+            valid_time = tile.time_window_handler.window(valid_idx).start
+        else:
+            valid_idx = stream_data.sample_idx + fstep * self._stride
+            valid_time = self._producer_twh.window(valid_idx).start
 
         return valid_time, ReaderData(
             coords=coords.astype(np.float32),
