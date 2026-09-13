@@ -18,6 +18,7 @@ from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
 from weathergen.datasets.utils import get_tokens_lens
 from weathergen.model.attention import MultiCrossAttentionHeadVarlen
+from weathergen.model.chunking import ChunkInfo
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelOutput, ModelParams
 from weathergen.model.utils import get_num_parameters
@@ -48,7 +49,7 @@ class ForcedModel(Model):
         self,
         model_params: ModelParams,
         input: BatchSamples | ModelOutput,
-        forecast_steps: list[int],
+        chunk: ChunkInfo,
         dynamic_forcings: ForcingInput,
     ) -> ModelOutput:
         """Forward pass of the model
@@ -57,7 +58,7 @@ class ForcedModel(Model):
         Args:
             model_params : Query and embedding parameters
             input : the batch's source samples, or the previous chunk's output
-            forecast_steps : global forecast steps of the chunk to roll out
+            chunk : the tile of the rollout to advance, i.e. its global forecast steps
             dynamic_forcings : forcing sources sampled per forecast step
         Returns:
             A list containing all prediction results
@@ -66,10 +67,10 @@ class ForcedModel(Model):
 
         source_masks, source_sampling_idxs = self._get_source_masks_sample_idxs(source_samples)
 
-        # output_idxs start with output_offset
-        forecast_offset = source_samples.get_output_idxs()[0]
+        forecast_offset = chunk.forecast_offset
+        forecast_steps = chunk.steps
 
-        output = ModelOutput(forecast_steps, forecast_offset, source_samples)
+        output = ModelOutput(chunk, source_samples)
         # posteriors come from encoding the source window, so they exist only on the first chunk
         if posteriors is not None:
             output.add_latent_prediction(0, "posteriors", posteriors)

@@ -25,7 +25,9 @@ from torch.distributed.tensor import DTensor
 
 import weathergen.common.config as config
 from weathergen.common.config import Config
+from weathergen.datasets.data_reader_base import TimeWindowHandler
 from weathergen.datasets.multi_stream_data_sampler import MultiStreamDataSampler
+from weathergen.model.chunking import ChunkInfo
 from weathergen.model.ema import EMAModel
 from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
@@ -65,7 +67,10 @@ class ChunkPlan:
     """
 
     output_idxs: list[int]
-    chunks: list[list[int]]
+    # the rollout tiled into chunks, each carrying its own index, padding and timeline
+    tiles: list[ChunkInfo]
+    # the same rollout as a single tile, for running or reassembling it in one piece
+    whole: ChunkInfo
     should_write_output: bool
     should_accumulate_chunks: bool
     # None unless should_write_output; maps (stream_name, data) to physical units
@@ -195,13 +200,23 @@ class Trainer(TrainerBase):
 
         return target_and_aux_calculators
 
-    def _get_forecast_step_chunks(self, output_idxs: list[int], chunk_size: int) -> list[list[int]]:
-        """Split the forecast steps into contiguous chunks of at most chunk_size steps."""
-        assert chunk_size >= 1, f"forecast.chunk_size must be >= 1, got {chunk_size}."
-        return [
-            output_idxs[start : start + chunk_size]
-            for start in range(0, len(output_idxs), chunk_size)
-        ]
+    def _chunk_timeline(self, mode_cfg) -> tuple[TimeWindowHandler | None, int]:
+        """The timeline a tile's forecast steps are indices on, and the stride between them.
+
+        Both travel with the tile because a coupled consumer has to place this component's
+        predictions on *its* timeline, and passing them separately is how they came to be
+        omitted. `forecast.time_step` is absent in configs that leave the cadence to the
+        window step alone, where one forecast step is one window and the stride is 1.
+        """
+
+        handler = getattr(self.dataset_val, "time_window_handler", None)
+
+        time_step = mode_cfg.get("forecast", {}).get("time_step")
+        window_step = mode_cfg.get("time_window_step")
+        if time_step is None or window_step is None or window_step <= np.timedelta64(0, "ms"):
+            return handler, 1
+
+        return handler, max(1, int(time_step // window_step))
 
     def prepare_chunks(self, batch, mode_cfg, batch_size, bidx, targets_and_auxs) -> ChunkPlan:
         """Decide how this batch's rollout is chunked and what to do with each chunk.
@@ -213,7 +228,8 @@ class Trainer(TrainerBase):
 
         output_idxs = batch.get_output_idxs()
         chunk_size = forecast_cfg.get("chunk_size", len(output_idxs))
-        chunks = self._get_forecast_step_chunks(output_idxs, chunk_size)
+        handler, step_stride = self._chunk_timeline(mode_cfg)
+        tiles = ChunkInfo.tiles(output_idxs, chunk_size, handler, step_stride)
 
         num_samples_write = mode_cfg.get("output", {}).get("num_samples", 0) * batch_size
         should_write_output = bidx < num_samples_write
@@ -233,7 +249,8 @@ class Trainer(TrainerBase):
 
         return ChunkPlan(
             output_idxs=output_idxs,
-            chunks=chunks,
+            tiles=tiles,
+            whole=ChunkInfo.whole(output_idxs, chunk_size, handler, step_stride),
             should_write_output=should_write_output,
             should_accumulate_chunks=should_accumulate_chunks,
             denormalize_data_fct=denormalize_data_fct,
@@ -288,7 +305,7 @@ class Trainer(TrainerBase):
     def assemble_chunks(self, plan: ChunkPlan, physical, latent, batch) -> ModelOutput:
         """Reassemble the per-chunk predictions into one globally indexed ModelOutput."""
         # Data for validation purposes => accumulates in memory!?
-        preds_full = ModelOutput(plan.output_idxs, plan.output_idxs[0], batch.get_source_samples())
+        preds_full = ModelOutput(plan.whole, batch.get_source_samples())
         assert len(physical) == len(preds_full.physical), (
             f"Chunks cover {len(physical)} forecast steps, expected {len(preds_full.physical)}."
         )
@@ -311,7 +328,7 @@ class Trainer(TrainerBase):
 
         physical, latent = [], []
         forecast_chunk = batch.get_source_samples()
-        for chunk in plan.chunks:
+        for chunk in plan.tiles:
             forecast_chunk = self.step_chunk(forecast_chunk, chunk)
 
             if plan.should_write_output:
@@ -621,10 +638,20 @@ class Trainer(TrainerBase):
                 dtype=self.mixed_precision_dtype,
                 enabled=cf.with_mixed_precision,
             ):
+                # training runs the whole rollout in one piece, i.e. a single tile
+                output_idxs = batch.get_output_idxs()
+                handler, step_stride = self._chunk_timeline(self.training_cfg)
                 preds = self.model(
                     self.model_params,
                     batch.get_source_samples(),
-                    batch.get_output_idxs(),
+                    ChunkInfo.whole(
+                        output_idxs,
+                        self.training_cfg.get("forecast", {}).get(
+                            "chunk_size", len(output_idxs)
+                        ),
+                        handler,
+                        step_stride,
+                    ),
                     self.dynamic_forcings,
                 )
 

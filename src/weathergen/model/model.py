@@ -22,8 +22,9 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
-from weathergen.datasets.batch import BatchSamples, ModelBatch
+from weathergen.datasets.batch import BatchSamples
 from weathergen.datasets.utils import healpix_verts_rots, r3tos2
+from weathergen.model.chunking import ChunkInfo
 from weathergen.model.encoder import EncoderModule
 from weathergen.model.engines import (
     BilinearDecoder,
@@ -54,15 +55,14 @@ class ModelOutput:
 
     def __init__(
         self,
-        forecast_steps: list[int],
-        forecast_offset: int,
+        chunk: ChunkInfo,
         source_samples: BatchSamples,
     ) -> None:
-        self.forecast_offset = forecast_offset
-        # the first chunk keeps its leading forecast_offset steps as empty slots, so that
-        # concatenating the chunks of a rollout stays indexed by global forecast step
-        base = 0 if forecast_steps[0] == forecast_offset else forecast_steps[0]
-        self.forecast_steps = list(range(base, forecast_steps[-1] + 1))
+        # The tile says which steps it holds, which of them are padded leading slots and
+        # whose timeline they are on, so none of that is inferred from the step list here.
+        self.chunk = chunk
+        self.forecast_offset = chunk.forecast_offset
+        self.forecast_steps = list(chunk.forecast_steps)
 
         self.physical: list[dict[StreamName, torch.Tensor]] = [{} for _ in self.forecast_steps]
         self.latent: list[dict[str, torch.Tensor | LatentState]] = [{} for _ in self.forecast_steps]
@@ -70,7 +70,7 @@ class ModelOutput:
 
     def chunk_idx(self, fstep: int) -> int:
         """Index of forecast step fstep into chunk-local data, e.g. predictions."""
-        return fstep - self.forecast_steps[0]
+        return self.chunk.chunk_idx(fstep)
 
     def batch_idx(self, fstep: int) -> int:
         """Index of forecast step fstep into batch-global data, e.g. target coordinates."""
@@ -698,7 +698,7 @@ class Model(torch.nn.Module):
         self,
         model_params: ModelParams,
         input: BatchSamples | ModelOutput,
-        forecast_steps: list[int],
+        chunk: ChunkInfo,
     ) -> ModelOutput:
         """Forward pass of the model
 
@@ -706,18 +706,17 @@ class Model(torch.nn.Module):
         Args:
             model_params : Query and embedding parameters
             input : the batch's source samples, or the previous chunk's output
-            forecast_steps : global forecast steps of the chunk to roll out
+            chunk : the tile of the rollout to advance, i.e. its global forecast steps
         Returns:
             A list containing all prediction results
         """
         source_samples, tokens, posteriors = self._get_initial_conditions(input, model_params)
 
-        # output_idxs start with output_offset
-        global_steps = source_samples.get_output_idxs()
-        forecast_offset = global_steps[0]
-        final_step = global_steps[-1]
+        # the rollout's last step, not the tile's: pushforward is about the whole trajectory
+        final_step = source_samples.get_output_idxs()[-1]
+        forecast_steps = chunk.steps
 
-        output = ModelOutput(forecast_steps, forecast_offset, source_samples)
+        output = ModelOutput(chunk, source_samples)
         # posteriors come from encoding the source window, so they exist only on the first chunk
         if posteriors is not None:
             output.add_latent_prediction(0, "posteriors", posteriors)
