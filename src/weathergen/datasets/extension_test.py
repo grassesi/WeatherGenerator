@@ -7,13 +7,23 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-"""Contract of ExtendingReader: target windows past the end of the data, sources never."""
+"""Contract of ExtendingReader: target windows past the end of the data, sources never.
+
+`ExtendingReader` lives on the `dataset-extension` branch, which is not merged here -- see
+`three_year_inference_todo.md`. These tests are kept on `coupling_master` so they are not lost
+to a merge a second time, and skip until the module lands rather than breaking collection.
+"""
 
 import datetime
 
 import numpy as np
 import pytest
 import torch
+
+pytest.importorskip(
+    "weathergen.datasets.extension",
+    reason="ExtendingReader is on the dataset-extension branch, not merged here",
+)
 
 from weathergen.datasets.data_reader_base import (
     DataReaderTimestep,
