@@ -81,8 +81,11 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
         rdata = (
             get_reader_data(idx).shuffle(rng, shuffle, num_subset).remove_nan_coords_and_geoinfos()
         )
-        rdata.data = normalize_channels(rdata.data)
-        rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
+        rdata = dataclasses.replace(
+            rdata,
+            data=normalize_channels(rdata.data),
+            geoinfos=ds.normalize_geoinfos(rdata.geoinfos),
+        )
         rdatas += [rdata]
 
     return IOReaderData.combine(rdatas)

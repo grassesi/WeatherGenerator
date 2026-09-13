@@ -9,7 +9,7 @@
 
 import logging
 from abc import abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy import datetime64, timedelta64
@@ -145,10 +145,13 @@ class TimeWindowHandler:
         return DTRange(t_start_win, t_end_win)
 
 
-@dataclass
+@dataclass(frozen=True, eq=False)
 class ReaderData:
     """
     Wrapper for return values from DataReader.get_source and DataReader.get_target
+
+    The freezing prevents rebinding, but the arrays themselves stay writable. Prefer
+    copying arrays before modification and rebinding with `dataclasses.replace`.
     """
 
     coords: NDArray[DType]
@@ -173,6 +176,16 @@ class ReaderData:
             data=np.zeros((0, num_data_fields), dtype=np.float32),
             datetimes=np.zeros((0,), dtype=np.datetime64),
             is_spoof=False,
+        )
+
+    def copy(self) -> "ReaderData":
+        """Create independet copy, that is free to modify."""
+        return replace(
+            self,
+            coords=self.coords.copy(),
+            geoinfos=self.geoinfos.copy(),
+            data=self.data.copy(),
+            datetimes=self.datetimes.copy(),
         )
 
     def is_empty(self):
@@ -205,21 +218,18 @@ class ReaderData:
         idx_valid = np.logical_and(idx_valid, idx_valid_geoinfos)
 
         # apply
-        return ReaderData(
-            self.coords[idx_valid],
-            self.geoinfos[idx_valid],
-            self.data[idx_valid],
-            self.datetimes[idx_valid],
+        return replace(
+            self,
+            coords=self.coords[idx_valid],
+            geoinfos=self.geoinfos[idx_valid],
+            data=self.data[idx_valid],
+            datetimes=self.datetimes[idx_valid],
         )
 
     def shuffle(self, rng, shuffle: bool, num_subset: int) -> "ReaderData":
         """
         Drop a random subset of points as specified by num_subset
         num_subset = -1 indicates no points to be dropped
-
-        Returns
-        -------
-        self
         """
 
         # nothing to be done
@@ -241,12 +251,13 @@ class ReaderData:
         if shuffle is False:
             idxs_subset = np.sort(idxs_subset)
 
-        self.coords = self.coords[idxs_subset]
-        self.geoinfos = self.geoinfos[idxs_subset]
-        self.data = self.data[idxs_subset]
-        self.datetimes = self.datetimes[idxs_subset]
-
-        return self
+        return replace(
+            self,
+            coords=self.coords[idxs_subset],
+            geoinfos=self.geoinfos[idxs_subset],
+            data=self.data[idxs_subset],
+            datetimes=self.datetimes[idxs_subset],
+        )
 
 
 def check_reader_data(rdata: ReaderData, dtr: DTRange) -> None:
