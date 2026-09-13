@@ -255,7 +255,7 @@ def run_coupled_inference(args):
 
     global_cf = couplings.global_intialization(args.run_id)
     try:
-        couplings.run(args.private_config, global_cf)
+        couplings.run(args.private_config, global_cf, args.config, args.options)
     except Exception:
         # Never swallow the exception: the coupled setup validates itself with ValueErrors,
         # and returning normally here would report success for a run that never happened.
