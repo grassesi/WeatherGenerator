@@ -16,6 +16,11 @@ from weathergen.datasets.utils import (
 # the stable=True argument
 numpy_argsort_args = {"stable": True} if int(np.__version__.split(".")[0]) >= 2 else {}
 
+# Column layout of a target token, as `get_target_coords_local` writes it:
+#   stream_id (1) | times (TIMES_WIDTH) | geoinfos (per stream) | cell geometry (VERTEX_WIDTH)
+TIMES_WIDTH = 5
+VERTEX_WIDTH = 5 * (3 * 5) + 3 * 8
+
 
 def theta_phi_to_standard_coords(coords):
     thetas = ((90.0 - coords[:, 0]) / 180.0) * np.pi
@@ -448,7 +453,7 @@ def get_target_coords_local(
     a = torch.zeros(
         [
             *target_coords.shape[:-1],
-            1 + target_geoinfos.shape[1] + target_times.shape[1] + 5 * (3 * 5) + 3 * 8,
+            1 + target_geoinfos.shape[1] + target_times.shape[1] + VERTEX_WIDTH,
         ]
     )
     a[0] = stream_id
