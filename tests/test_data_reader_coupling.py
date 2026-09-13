@@ -87,6 +87,24 @@ def coords() -> NDArray[np.float32]:
     ).astype(np.float32)
 
 
+class FakeStreamData:
+    """The `streams_datasets` entry a Coupler reaches through to reach a producer's readers."""
+
+    def __init__(self, reader: FakeReader) -> None:
+        self.readers = [reader]
+
+
+class FakeDataset:
+    def __init__(self, streams: dict[str, FakeReader]) -> None:
+        self.streams_datasets = {n: FakeStreamData(r) for n, r in streams.items()}
+
+
+class FakeTrainer:
+    def __init__(self, name: str, streams: dict[str, FakeReader]) -> None:
+        self.name = name
+        self.dataset = FakeDataset(streams)
+
+
 @pytest.fixture
 def chunk(coords) -> tuple[ModelOutput, ModelBatch]:
     """One rollout chunk: predictions plus the batch carrying the target geometry."""
@@ -210,6 +228,69 @@ def test_eviction_bounds_the_window_store(consumer, chunk):
     assert not reader.get_source(np.int64(SAMPLE_IDX + FSTEPS[-1])).is_empty()
 
 
+def _producer_with_wider_target(time_window_handler) -> FakeReader:
+    """A producer predicting five channels, of which the consumer sources two.
+
+    The consumer's `sst` and `sea_ice` sit at positions 3 and 1, so taking the first two
+    columns positionally yields `10u` and `sea_ice` instead.
+    """
+    producer = FakeReader(time_window_handler)
+    producer.target_channels = ["10u", "sea_ice", "2d", "sst", "msl"]
+    producer.target_idx = [0, 1, 2, 3, 4]
+    producer.mean = np.zeros(5, dtype=np.float32)
+    producer.stdev = np.ones(5, dtype=np.float32)
+    return producer
+
+
+def test_channels_are_selected_by_name_not_position(consumer, time_window_handler):
+    """A producer's channel list agrees with its consumer's in neither order nor length.
+
+    Selecting positionally is what delivered the atmosphere's `2d` (~273 K) to the ocean
+    labelled `z_1000` (~10^3 m^2 s^-2): the ocean's source channels were read off the
+    producer's first three columns.
+    """
+    producer = _producer_with_wider_target(time_window_handler)
+
+    reader = DataReaderCoupling(consumer, STREAM, producer=producer)
+
+    assert list(reader._pred_cols) == [3, 1], "sst is producer column 3, sea_ice column 1"
+
+
+def test_named_channels_survive_the_round_trip(consumer, coords, time_window_handler):
+    """End to end: the values the consumer reads back are the ones it named."""
+    producer = _producer_with_wider_target(time_window_handler)
+    times = np.array(["2023-01-01T00:00"] * N_POINTS, dtype="datetime64[ns]")
+
+    batch = ModelBatch([STREAM], 1, 1, FORECAST_OFFSET, FSTEPS[-1] + 1)
+    source = StreamData(SAMPLE_IDX, 1, FSTEPS[-1] + 1, healpix_cells=48)
+    target = StreamData(SAMPLE_IDX, 1, FSTEPS[-1] + 1, healpix_cells=48)
+    for fstep in FSTEPS:
+        target.target_coords_raw[fstep] = torch.tensor(coords)
+        target.target_times_raw[fstep] = times
+        target.idxs_inv[fstep] = torch.arange(N_POINTS - 1, -1, -1)
+        target.target_is_spoof[fstep] = False
+        source.target_coords[fstep] = _target_tokens(GEOINFOS)
+        source.target_is_spoof[fstep] = False
+    batch.add_source_stream(0, 0, STREAM, source, SampleMetaData(params={}, mask=None))
+    batch.add_target_stream(0, 0, STREAM, target, SampleMetaData(params={}, mask=None))
+
+    tile = ChunkInfo.tiles(FSTEPS, len(FSTEPS))[0]
+    output = ModelOutput(tile, batch.get_source_samples())
+    for fstep in FSTEPS:
+        # channel j carries the value j * 10, so which column was taken is visible
+        pred = torch.arange(5, dtype=torch.float32).mul(10.0).expand(1, N_POINTS, 5).contiguous()
+        output.add_physical_prediction(output.chunk_idx(fstep), STREAM, [pred])
+
+    reader = DataReaderCoupling(consumer, STREAM, producer=producer)
+    reader.add_chunk(output, batch)
+    rdata = reader.get_source(np.int64(SAMPLE_IDX + FSTEPS[0]))
+
+    # consumer order is [sst, sea_ice] -> producer columns [3, 1] -> values [30, 10].
+    # Positional selection would have given [0, 10].
+    assert np.allclose(rdata.data[:, 0], 30.0), "sst must come from the channel named sst"
+    assert np.allclose(rdata.data[:, 1], 10.0)
+
+
 def test_missing_producer_channel_is_reported(consumer, time_window_handler):
     producer = FakeReader(time_window_handler)
     producer.target_channels = ["sst"]
@@ -219,10 +300,34 @@ def test_missing_producer_channel_is_reported(consumer, time_window_handler):
         DataReaderCoupling(consumer, STREAM, producer=producer)
 
 
+def test_coupler_resolves_the_channel_map_against_the_producer(consumer, time_window_handler):
+    """F1: subscribe() must hand the reader the producing component's own reader.
+
+    The reader has always resolved by name when given a producer; the defect was that
+    `subscribe()` never passed one, so every coupling fell back to the branch that assumes
+    producer and consumer share a channel list.
+    """
+    producer = _producer_with_wider_target(time_window_handler)
+    coupler = Coupler(
+        {"atmo": (FakeTrainer("atmo", {STREAM: producer}), None)},
+        {"c": Coupling(name="c", producer="atmo", consumer="ocean", stream=STREAM)},
+    )
+    forcings = ForcingInput(
+        "validation", time_window_handler, {STREAM: [consumer]}, tokenizer=None
+    )
+
+    reader = coupler.subscribe("ocean", forcings).forcing_streams[STREAM][0]
+
+    assert list(reader._pred_cols) == [3, 1], "channel map must come from the producer"
+
+
 def test_coupler_substitutes_only_coupled_streams(consumer, chunk, time_window_handler):
     # components first, couplings second: this driver owns the components too
+    # the producer has to be resolvable: its reader is what the channel map is built against
+    producer = FakeReader(time_window_handler)
     coupler = Coupler(
-        {}, {"c": Coupling(name="c", producer="atmo", consumer="ocean", stream=STREAM)}
+        {"atmo": (FakeTrainer("atmo", {STREAM: producer}), None)},
+        {"c": Coupling(name="c", producer="atmo", consumer="ocean", stream=STREAM)},
     )
     forcings = ForcingInput(
         "validation",

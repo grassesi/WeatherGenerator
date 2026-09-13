@@ -305,7 +305,11 @@ class Coupler:
             # real readers with coupling readers, so resubscribing from an already-coupled
             # ForcingInput would wrap a coupling reader in another one.
             self._pristine_forcings[name] = trainer.dynamic_forcings
-            trainer.dynamic_forcings = self.subscribe(trainer.name, trainer.dynamic_forcings)
+
+        # Subscribe only once every component is built.
+        for name in self._names:
+            trainer = self.trainer(name)
+            trainer.dynamic_forcings = self.subscribe(name, self._pristine_forcings[name])
 
         self._announce_couplings()
 
@@ -356,6 +360,33 @@ class Coupler:
             live[coupling.name] = coupling
 
         self._couplings = live
+
+    def _producer_reader(self, producer: str, stream: str) -> DataReaderBase:
+        """The producing component's own reader for `stream`.
+
+        This is what the coupling reader resolves its channel map against, and it has to be the
+        producer's rather than the consumer's: the two components carry separate configs for the
+        same stream, and their channel lists agree in neither order nor length.
+        """
+
+        dataset = self.trainer(producer).dataset
+        if dataset is None:
+            msg = (
+                f"Component {producer!r} has no dataset yet, so the channels it produces for "
+                f"stream {stream!r} cannot be resolved. Every component must be set up before "
+                "any is subscribed."
+            )
+            raise ValueError(msg)
+
+        stream_data = dataset.streams_datasets.get(stream)
+        if stream_data is None or not stream_data.readers:
+            msg = (
+                f"Component {producer!r} carries no reader for stream {stream!r}, so it cannot "
+                "produce it. _check_couplings should have dropped this coupling."
+            )
+            raise ValueError(msg)
+
+        return stream_data.readers[0]
 
     def _produced_streams(self, name: str) -> list[str]:
         """Streams this component is the producer of, in declaration order."""
@@ -745,6 +776,7 @@ class Coupler:
                 reader = DataReaderCoupling(
                     readers[0], # TODO what if multiple readers?
                     stream,
+                    producer=self._producer_reader(coupling.producer, stream),
                     forecast_step_stride=forecast_step_stride,
                     # TODO point it exactly at initialization date
                 )
