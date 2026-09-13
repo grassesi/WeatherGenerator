@@ -43,7 +43,9 @@ class AveragingReader(DataReaderTimestep):
             channel for channel in self.geoinfo_channels if channel in AVERAGING_GEOINFOS
         ]  # construct unique column labels
         self.non_averaging_geoinfo_idx = [
-            idx for idx, _ in enumerate(self.geoinfo_idx) if idx not in self.averaging_geoinfo_idx
+            idx
+            for idx, _ in enumerate(self.geoinfo_channels)
+            if idx not in self.averaging_geoinfo_idx
         ]
 
     @typing.override
@@ -62,7 +64,8 @@ class AveragingReader(DataReaderTimestep):
         Averages are calculated on all source/target channels and on selected
         geoinfo channels (eg. insolation, z). Static features and time features
         are taken from last datapoint in the interval. The new data thus has the
-        following semantics: data in interval (<start>, <end>) => data averaged over the last <interval len> hours at time <end>.
+        following semantics: data in interval (<start>, <end>) => data averaged over the last
+        <interval len> hours at time <end>.
         """
         rdata = self._wrapped_reader._get(idx, channels_idx)
         max_time_idx = np.argwhere(rdata.datetimes == rdata.datetimes.max())
@@ -81,15 +84,19 @@ class AveragingReader(DataReaderTimestep):
             .mean()
         )
 
+        # Scatter both halves back to the positions geoinfo_channels declares. Everything
+        # downstream indexes geoinfos by position and not by name
+        geoinfos = np.empty(
+            (len(max_time_idx), len(self.geoinfo_channels)), dtype=rdata.geoinfos.dtype
+        )
+        geoinfos[:, self.averaging_geoinfo_idx] = data[self.averaging_geoinfos].values
+        geoinfos[:, self.non_averaging_geoinfo_idx] = rdata.geoinfos[
+            max_time_idx, self.non_averaging_geoinfo_idx
+        ]
+
         return ReaderData(
             coords=rdata.coords[max_time_idx, :].squeeze(),
-            geoinfos=np.concat(
-                [
-                    data[self.averaging_geoinfos].values,
-                    rdata.geoinfos[max_time_idx, self.non_averaging_geoinfo_idx],
-                ],
-                axis=1,
-            ),
+            geoinfos=geoinfos,
             data=data[channels_idx].values,
             datetimes=rdata.datetimes[max_time_idx].squeeze(),
             is_spoof=rdata.is_spoof,
