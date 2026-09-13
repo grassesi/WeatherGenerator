@@ -20,7 +20,6 @@ from weathergen.datasets.data_reader_base import (
     TimeWindowHandler,
     TIndex,
 )
-from weathergen.datasets.holding import HoldingReader
 from weathergen.datasets.tokenizer_utils import TIMES_WIDTH
 from weathergen.model.chunking import ChunkInfo
 from weathergen.model.forcing import ForcingInput
@@ -280,7 +279,6 @@ class Coupler:
         # (consumer, stream) pairs already reported, so a resubscribe stays quiet
         self._announced: set[tuple[str, str]] = set()
         # per component, filled by _derive_component_configs and read by subscribe()
-        self._windows_per_chunk: dict[str, int] = {}
         self._fsteps_per_chunk: dict[str, int] = {}
         # producer -> readers waiting for its chunks
         self._subscribers: dict[str, list[DataReaderCoupling]] = {}
@@ -433,9 +431,6 @@ class Coupler:
                 "model_input": self._batch_size_one(name, test_cfg),
             }
 
-            # kept for subscribe(): how many windows a consumer asks for per chunk against
-            # how many its producer actually emits is exactly the hold depth
-            self._windows_per_chunk[name] = sample_stride
             self._fsteps_per_chunk[name] = fsteps_per_chunk
 
             self._warn_on_overwrite(
@@ -753,13 +748,8 @@ class Coupler:
                     forecast_step_stride=forecast_step_stride,
                     # TODO point it exactly at initialization date
                 )
-                # register coupling for producer -- always the inner reader, which is what
-                # add_chunk belongs to; the hold only affects what is read back out
+                # register coupling for producer: this is the reader add_chunk belongs to
                 self._subscribers.setdefault(coupling.producer, []).append(reader)
-
-                served = self._hold_depth(consumer, coupling.producer)
-                if served:
-                    reader = HoldingReader(reader, max_hold=served)
 
                 # once per run, not once per batch: the readers are rebuilt for every
                 # trajectory, but the wiring they describe is the same every time, and this
@@ -776,34 +766,6 @@ class Coupler:
 
         forcings.forcing_streams = forcing_streams_coupled
         return forcings
-
-    def _hold_depth(self, consumer: str, producer: str) -> int:
-        """How many empty windows a consumer may fill from one of its producer's chunks.
-
-        A producer emits one window per forecast step, a consumer asks for one per time
-        window, and the two components run at different cadences by design -- 24 h against
-        6 h for the ocean/atmosphere pair. The gap is structural, not incidental: an ocean
-        that predicts daily can never fill three of every four atmospheric windows, and an
-        empty forcing window is an absent field, which neither model saw in training.
-
-        Returns 0 when the producer is at least as fine as the consumer and the cadences
-        divide evenly, in which case nothing needs holding.
-        """
-
-        windows = self._windows_per_chunk.get(consumer)
-        emitted = self._fsteps_per_chunk.get(producer)
-        if not windows or not emitted:
-            # derivation has not run, or one of the two is unknown; hold nothing rather than
-            # guess, so a missing cadence shows up as spoof instead of as invented data
-            return 0
-
-        # ceil division: with 4 consumer windows to 1 produced window, one window is served
-        # and 3 are held
-        depth = -(-windows // emitted) - 1
-
-        # a producer finer than its consumer should land on every window, but the two only
-        # have to agree on chunk boundaries, so allow a single window of slip
-        return max(depth, 1)
 
     def _resubscribe(self) -> None:
         """Give every component fresh coupling readers, discarding the previous batch's.
