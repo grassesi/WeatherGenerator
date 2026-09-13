@@ -1,5 +1,7 @@
 """Contract of DataReaderCoupling: the subset of the reader interface ForcingInput uses."""
 
+import dataclasses
+
 import numpy as np
 import pytest
 import torch
@@ -9,6 +11,8 @@ from weathergen.common.coupling import Coupler, Coupling, DataReaderCoupling
 from weathergen.datasets.batch import ModelBatch, SampleMetaData
 from weathergen.datasets.data_reader_base import DataReaderBase, TimeWindowHandler
 from weathergen.datasets.stream_data import StreamData
+from weathergen.datasets.tokenizer_utils import TIMES_WIDTH, VERTEX_WIDTH
+from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
 
 STREAM = "ERA5-Ocean"
@@ -16,6 +20,23 @@ N_POINTS = 7
 SAMPLE_IDX = 100
 FORECAST_OFFSET = 1
 FSTEPS = [1, 2]
+
+# The producer's geoinfos travel inside its tokenized target coords, one column here since
+# FakeReader declares a single geoinfo channel. Normalized, as the tokenizer stored them.
+GEOINFO_COL = 1 + TIMES_WIDTH
+GEOINFOS = np.linspace(-1.0, 1.0, N_POINTS, dtype=np.float32)
+
+
+def _target_tokens(geoinfos: NDArray[np.float32]) -> torch.Tensor:
+    """One row per point in get_target_coords_local's layout, geoinfos in their column.
+
+    Everything else is filled with a value that is wrong if it is ever read as a geoinfo,
+    so a slice off by one column fails the assertions rather than passing by luck.
+    """
+    row_width = 1 + TIMES_WIDTH + 1 + VERTEX_WIDTH
+    tokens = torch.full((len(geoinfos), row_width), -99.0, dtype=torch.float32)
+    tokens[:, GEOINFO_COL] = torch.from_numpy(geoinfos)
+    return tokens
 
 
 class FakeReader(DataReaderBase):
@@ -74,11 +95,15 @@ def chunk(coords) -> tuple[ModelOutput, ModelBatch]:
     source = StreamData(SAMPLE_IDX, 1, FSTEPS[-1] + 1, healpix_cells=48)
     target = StreamData(SAMPLE_IDX, 1, FSTEPS[-1] + 1, healpix_cells=48)
     for fstep in FSTEPS:
+        # the two halves of the geometry live on different samples: add_target_values writes
+        # the raw coords, times and idxs_inv, add_target_coords the tokenized target coords
         target.target_coords_raw[fstep] = torch.tensor(coords)
         target.target_times_raw[fstep] = times
         # a non-trivial permutation, so applying it is observable
         target.idxs_inv[fstep] = torch.arange(N_POINTS - 1, -1, -1)
         target.target_is_spoof[fstep] = False
+        source.target_coords[fstep] = _target_tokens(GEOINFOS)
+        source.target_is_spoof[fstep] = False
 
     batch.add_source_stream(0, 0, STREAM, source, SampleMetaData(params={}, mask=None))
     batch.add_target_stream(0, 0, STREAM, target, SampleMetaData(params={}, mask=None))
@@ -96,8 +121,11 @@ def collect(reader: DataReaderCoupling, idx: int):
     """The call sequence ForcingInput._collect_forcing_data runs on a reader."""
     rdata = reader.get_source(np.int64(idx)).shuffle(None, False, -1)
     rdata = rdata.remove_nan_coords_and_geoinfos()
-    rdata.data = reader.normalize_source_channels(rdata.data)
-    rdata.geoinfos = reader.normalize_geoinfos(rdata.geoinfos)
+    rdata = dataclasses.replace(
+        rdata,
+        data=reader.normalize_source_channels(rdata.data),
+        geoinfos=reader.normalize_geoinfos(rdata.geoinfos),
+    )
     return rdata
 
 
@@ -137,8 +165,11 @@ def test_normalization_round_trip(consumer, chunk):
         rdata = collect(reader, SAMPLE_IDX + fstep)
 
         assert np.allclose(rdata.data, float(fstep))
-        # geoinfos are not predicted, they normalize to zero rather than to noise
-        assert np.allclose(rdata.geoinfos, 0.0)
+        # geoinfos are the producer's own, recovered from its target tokens and denormalized
+        # on the way out, so normalizing again returns the values the tokenizer stored --
+        # reordered by idxs_inv alongside the data. Never zero: that was the defect this
+        # replaces, where the consumer's climatological mean stood in for them.
+        assert np.allclose(rdata.geoinfos[:, 0], GEOINFOS[::-1])
 
 
 def test_stored_windows_survive_in_place_normalization(consumer, chunk):
@@ -152,15 +183,20 @@ def test_stored_windows_survive_in_place_normalization(consumer, chunk):
     assert np.allclose(again.data[0], expected)
 
 
-def test_spoofed_producer_steps_are_skipped(consumer, chunk):
+def test_spoofed_producer_steps_abort_the_coupling(consumer, chunk):
+    """A spoof means the producer has no data there, which is not recoverable.
+
+    `spoof` stands in for a window that came back empty, so during a rollout it says the
+    trajectory was initialized outside the producer's dataset range -- a setup error, not a
+    per-step condition to skip. Skipping it would force the consumer on climatological means
+    with no signal that it happened.
+    """
     output, batch = chunk
     batch.get_target_sample(0).streams_data[STREAM].target_is_spoof[FSTEPS[0]] = True
 
     reader = DataReaderCoupling(consumer, STREAM)
-    reader.add_chunk(output, batch)
-
-    assert reader.get_source(np.int64(SAMPLE_IDX + FSTEPS[0])).is_empty()
-    assert not reader.get_source(np.int64(SAMPLE_IDX + FSTEPS[1])).is_empty()
+    with pytest.raises(ValueError, match="Cannot pair prediction with its target geometry"):
+        reader.add_chunk(output, batch)
 
 
 def test_eviction_bounds_the_window_store(consumer, chunk):
@@ -181,16 +217,27 @@ def test_missing_producer_channel_is_reported(consumer, time_window_handler):
         DataReaderCoupling(consumer, STREAM, producer=producer)
 
 
-def test_coupler_substitutes_only_coupled_streams(consumer, chunk):
-    coupler = Coupler({"c": Coupling(name="c", producer="atmo", consumer="ocean", stream=STREAM)})
+def test_coupler_substitutes_only_coupled_streams(consumer, chunk, time_window_handler):
+    # components first, couplings second: this driver owns the components too
+    coupler = Coupler(
+        {}, {"c": Coupling(name="c", producer="atmo", consumer="ocean", stream=STREAM)}
+    )
+    forcings = ForcingInput(
+        "validation",
+        time_window_handler,
+        {STREAM: [consumer], "era5": [consumer]},
+        tokenizer=None,
+    )
 
-    forcings = coupler.get_forcings("ocean", {STREAM: [consumer], "era5": [consumer]})
+    subscribed = coupler.subscribe("ocean", forcings)
+    streams = subscribed.forcing_streams
 
-    assert isinstance(forcings[STREAM][0], DataReaderCoupling)
-    assert forcings["era5"][0] is consumer
+    assert isinstance(streams[STREAM][0], DataReaderCoupling)
+    # a stream no coupling names is left on its own reader
+    assert streams["era5"][0] is consumer
 
     coupler.dispatch_chunk("atmo", *chunk)
-    assert not forcings[STREAM][0].get_source(np.int64(SAMPLE_IDX + FSTEPS[0])).is_empty()
+    assert not streams[STREAM][0].get_source(np.int64(SAMPLE_IDX + FSTEPS[0])).is_empty()
 
     # a producer nothing is subscribed to is a no-op, not an error
     coupler.dispatch_chunk("nobody", *chunk)
