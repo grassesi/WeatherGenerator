@@ -277,7 +277,11 @@ class Coupler:
         # component -> the forcings the Trainer built, before any coupling substitution
         self._pristine_forcings: dict[str, ForcingInput] = {}
         # (consumer, stream) pairs already reported, so a resubscribe stays quiet
-        self._announced: set[tuple[str, str]] = set()
+        # (consumer, stream) pairs whose reader subscribe() actually replaced. Recorded at the
+        # point of substitution, which is the only place that knows: asking the reader stack
+        # afterwards means asking what type its outermost reader is, and that answer changes
+        # the moment anything wraps it.
+        self._substituted: set[tuple[str, str]] = set()
         # per component, filled by _derive_component_configs and read by subscribe()
         self._fsteps_per_chunk: dict[str, int] = {}
         # producer -> readers waiting for its chunks
@@ -567,17 +571,17 @@ class Coupler:
         Reports what the wiring actually did, not what the config asked for: a coupling only
         takes effect if the consumer already reads that stream as a dynamic forcing, so a
         declared consumer can substitute nothing at all.
+
+        The record comes from `_substituted`, written by subscribe() as it substitutes. Deriving
+        it instead from the reader stack -- "is the outermost reader a DataReaderCoupling" -- is
+        what made this function report a live exchange as dead for as long as subscribe() wrapped
+        that reader in a HoldingReader.
         """
-        # a stream is exchanged iff its reader was swapped for a coupling reader
-        exchanged: dict[str, list[str]] = {}
-        for name in self._names:
-            forcing = self.trainer(name).dynamic_forcings
-            streams = {} if forcing is None else forcing.forcing_streams
-            exchanged[name] = sorted(
-                stream
-                for stream, readers in streams.items()
-                if any(isinstance(reader, DataReaderCoupling) for reader in readers)
-            )
+        exchanged: dict[str, list[str]] = {name: [] for name in self._names}
+        for consumer, stream in self._substituted:
+            exchanged.setdefault(consumer, []).append(stream)
+        for streams in exchanged.values():
+            streams.sort()
 
         declared = [c for c in self._couplings.values() if c.consumer is not None]
         live = [c for c in declared if c.stream in exchanged.get(c.consumer, [])]
@@ -599,7 +603,7 @@ class Coupler:
             forcing = self.trainer(name).dynamic_forcings
             if forcing is None or forcing.is_empty:
                 continue
-            coupled = exchanged[name]
+            coupled = exchanged.get(name, [])
             from_disk = sorted(set(forcing.forcing_streams) - set(coupled))
             if coupled:
                 logger.info(f"Component {name!r} is forced by another component on: {coupled}.")
@@ -786,8 +790,8 @@ class Coupler:
                 # once per run, not once per batch: the readers are rebuilt for every
                 # trajectory, but the wiring they describe is the same every time, and this
                 # line is what a run is checked against to prove the exchange is live
-                if (consumer, stream) not in self._announced:
-                    self._announced.add((consumer, stream))
+                if (consumer, stream) not in self._substituted:
+                    self._substituted.add((consumer, stream))
                     logger.info(
                         f"Stream '{stream}' of component '{consumer}' is forced by "
                         f"component '{coupling.producer}'."
