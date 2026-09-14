@@ -30,7 +30,7 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 
-from weathergen.common.config import parse_timedelta
+from weathergen.common.config import parse_timedelta, timedelta_to_str
 from weathergen.datasets.data_reader_base import (
     NPDT64,
     DataReaderBase,
@@ -220,6 +220,23 @@ class DataReaderCoupling(DataReaderTimestep):
         self._source_handler = (
             producer.time_window_handler if producer is not None else dataset.time_window_handler
         )
+        # Gathering only exists to reconcile two grids. With no producer there is one grid, and
+        # the consumer's own disk reader is the authority on what a window holds -- it already
+        # returns every sample inside it. Gathering there would concatenate overlapping windows
+        # and, at a lag finer than the window step, reach the very window being predicted.
+        self._gathers = producer is not None
+
+        if self._gathers:
+            source = producer.time_window_handler
+            if source.t_window_len > source.t_window_step:
+                msg = (
+                    f"Coupled stream {producer_stream!r}: its producer's windows are "
+                    f"{timedelta_to_str(source.t_window_len)} long on a "
+                    f"{timedelta_to_str(source.t_window_step)} step, so consecutive emissions "
+                    "overlap and a request spanning several of them would count the shared "
+                    "points twice."
+                )
+                raise ValueError(msg)
 
         # consumer side: how ForcingInput will tokenize and normalize what we return
         self.source_channels = list(dataset.source_channels)
@@ -415,25 +432,35 @@ class DataReaderCoupling(DataReaderTimestep):
         win = self._request_handler.window(idx)
         self.provenance.requests += 1
 
-        source_idxs = self._source_idxs_within(win)
-        if source_idxs:
-            parts = [self._fetch(j, channels_idx) for j in source_idxs]
-            rdata = _concatenate(parts, len(self.source_idx), len(self.geoinfo_idx))
-            return self._clip(rdata, win)
+        if self._gathers:
+            source_idxs = self._source_idxs_within(win)
+            if source_idxs:
+                parts = [self._fetch(j, channels_idx) for j in source_idxs]
+                rdata = _concatenate(parts, len(self.source_idx), len(self.geoinfo_idx))
+                return self._clip(rdata, win)
 
-        # The source is coarser than the request window, so nothing starts inside it. Hold the
-        # covering window: the value is the last known state of the field, presented at the
-        # time it is being served for (`upsampling.py`), not as an observation from 18 h ago.
+        # Either the source is coarser than the request window, so nothing starts inside it, or
+        # there is only one grid and the request names one window on it. Hold the covering
+        # window: the value is the last known state of the field, presented at the time it is
+        # being served for (`upsampling.py`), not as an observation from 18 h ago.
+        #
+        # Quantising *backwards* is what keeps a lag finer than the source step honest. Rounding
+        # to the nearest window would let a 3 h lag on a 6 h grid serve the window the consumer
+        # is predicting, i.e. no lag at all.
         src = self._covering_source_idx(win.start)
         rdata = self._fetch(src, channels_idx)
         if rdata.is_empty():
             return rdata
 
+        source_start = self._source_handler.window(src).start
+        if source_start == win.start:
+            return self._clip(rdata, win)
+
         self.provenance.held += 1
-        shift = win.start - self._source_handler.window(src).start
+        shift = win.start - source_start
         logger.debug(
             f"Stream '{self._producer_stream}': request {win.start} .. {win.end} held from "
-            f"source window {self._source_handler.window(src).start} (shift {shift})."
+            f"source window {source_start} (shift {shift})."
         )
         return self._clip(restamp(rdata, shift, self._computed_geoinfos), win)
 

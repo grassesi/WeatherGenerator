@@ -227,7 +227,10 @@ class Trainer(TrainerBase):
         forecast_cfg = mode_cfg.get("forecast", {})
 
         output_idxs = batch.get_output_idxs()
-        chunk_size = forecast_cfg.get("chunk_size", len(output_idxs))
+        # `.get(key, default)` returns None for a key that is present and null, and the schema
+        # carries it as null, so the fallback has to be spelled out rather than defaulted
+        chunk_size = forecast_cfg.get("chunk_size")
+        chunk_size = len(output_idxs) if chunk_size is None else chunk_size
         handler, step_stride = self._chunk_timeline(mode_cfg)
         tiles = ChunkInfo.tiles(output_idxs, chunk_size, handler, step_stride)
 
@@ -649,14 +652,13 @@ class Trainer(TrainerBase):
                 # training runs the whole rollout in one piece, i.e. a single tile
                 output_idxs = batch.get_output_idxs()
                 handler, step_stride = self._chunk_timeline(self.training_cfg)
+                chunk_size = self.training_cfg.get("forecast", {}).get("chunk_size")
                 preds = self.model(
                     self.model_params,
                     batch.get_source_samples(),
                     ChunkInfo.whole(
                         output_idxs,
-                        self.training_cfg.get("forecast", {}).get(
-                            "chunk_size", len(output_idxs)
-                        ),
+                        len(output_idxs) if chunk_size is None else chunk_size,
                         handler,
                         step_stride,
                     ),

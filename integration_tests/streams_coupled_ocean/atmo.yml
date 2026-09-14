@@ -20,6 +20,12 @@ ATMO :
   frequency : 06:00:00
   average_window : True
   is_dynamic_forcing : true
+  # How far before the window it forces this stream is sampled. A property of the *model*, so
+  # it lives on the stream and rides in the checkpoint: the dynamic-forcing response is trained
+  # at one lag and the same lag must hold through finetuning and inference. The couplings file
+  # must not set it. Absent, or the alias 'step', means forecast.offset * time_window_step,
+  # which is what the code did before the key existed.
+  # forcing_lag : '06:00:00'
   masking_rate_none : 0.05
   token_size : 32
   tokenize_spacetime : True

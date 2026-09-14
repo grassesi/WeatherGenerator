@@ -226,7 +226,9 @@ class Couplings:
 
         # instantiate all components
         components = {
-            name: checkpoint.get_component(private_config, configs, options, global_cf)
+            name: checkpoint.get_component(
+                private_config, configs, self._options_for(name, options), global_cf
+            )
             for name, checkpoint in self.checkpoints.items()
         }
         
@@ -241,6 +243,34 @@ class Couplings:
         logger.info(f"Starting coupled inference with id={run_id} over {list(components)}.")
         coupler.validate(mini_epoch=0)
         logger.info(f"Finished coupled inference run with id: {run_id}")
+
+    def _options_for(self, name: str, options: list[str]) -> list[str]:
+        """The --options entries that apply to one component.
+
+        An option may be addressed at a single component by prefixing it with that
+        component's name and a colon -- `Ocean:with_fsdp=False`. Everything else applies to
+        every component, which is what a run-wide execution setting wants.
+
+        Without this a coupled run has no route to one component's config: each is loaded from
+        its own checkpoint, and the couplings file is deliberately about the rollout rather
+        than about how a particular half is executed. Colons are matched only against the
+        known component names, so a value carrying one -- a duration, say -- is untouched.
+        """
+
+        prefixes = {f"{component}:" for component in self.checkpoints}
+        mine, shared = [], []
+        for option in options:
+            for prefix in prefixes:
+                if option.startswith(prefix):
+                    if prefix == f"{name}:":
+                        mine.append(option[len(prefix) :])
+                    break
+            else:
+                shared.append(option)
+
+        if mine:
+            logger.info(f"Component {name!r} takes the per-component overrides {mine}.")
+        return [*shared, *mine]
 
 class Coupler:
     """Central driver: owns the batch and chunk loops of every component.

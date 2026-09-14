@@ -333,13 +333,14 @@ def test_a_request_resolves_to_the_source_windows_inside_it(
     assert rdata.data.shape == (N_POINTS * len(wanted), len(consumer.source_idx))
 
 
-@pytest.mark.parametrize("lag", [ZERO, H6, np.timedelta64(3, "h")])
+@pytest.mark.parametrize("lag", [ZERO, H6, H24])
 def test_an_unforced_stream_reads_the_same_window_through_the_same_arithmetic(lag):
-    """L7: the same lag and the same gathering must hold when the rows come from disk.
+    """L7: the same lag and the same window must hold when the rows come from disk.
 
     This is the row that pins train/inference consistency. An uncoupled run reads exactly what
     it reads today, but through the reader a coupled run reads through, so the two cannot drift
-    apart by one path changing and the other not.
+    apart by one path changing and the other not. Whole multiples of the window step only --
+    the fractional case is the next test, where the two paths part on purpose.
     """
 
     c_handler = handler(CONSUMER_START, H6)
@@ -362,6 +363,39 @@ def test_an_unforced_stream_reads_the_same_window_through_the_same_arithmetic(la
 
     assert served_times(from_disk) == served_times(primed)
     assert np.allclose(from_disk.data, primed.data)
+
+
+def test_a_fractional_lag_quantises_backwards(consumer, consumer_handler):
+    """A lag finer than the source step resolves to the window covering it, never past it.
+
+    Rounding forward would let a 3 h lag on a 6 h grid serve the window the consumer is
+    predicting -- no lag at all, and the partner's state at the very time being forecast.
+    `Coupler` warns about the quantisation at setup so it is visible rather than silent.
+    """
+
+    reader = DataReaderCoupling(
+        consumer,
+        STREAM,
+        request_handler=shifted(consumer_handler, np.timedelta64(3, "h")),
+        is_forced=False,
+    )
+    predicts = np.datetime64("2023-01-03T00:00")
+    rdata = reader.get_source(idx_of(consumer_handler, predicts))
+
+    assert served_origins(rdata) == [predicts - H6], "the covering window, not the next one"
+    # restamped onto the request, so the tokenizer still sees it inside the window it asked for
+    assert served_times(rdata) == [np.datetime64(predicts - np.timedelta64(3, "h"), "m")]
+    assert reader.provenance.held == 1
+
+
+def test_an_overlapping_producer_grid_is_refused(consumer, consumer_handler):
+    """Gathering concatenates, so overlapping source windows would count shared points twice."""
+
+    overlapping = StampedReader(handler(PRODUCER_START, H6))
+    overlapping.time_window_handler = TimeWindowHandler(PRODUCER_START, END, H24, H6)
+
+    with pytest.raises(ValueError, match="consecutive emissions"):
+        DataReaderCoupling(consumer, STREAM, producer=overlapping)
 
 
 def test_the_lag_is_what_moves_the_window(consumer, consumer_handler, producer):

@@ -14,9 +14,10 @@ interleaved loop. Trains both halves from scratch, then couples them.
 
 What this covers that the unit tests cannot: the unit tests drive the Coupler with fakes, so
 they say nothing about whether a real reader stack survives being rebased onto a coupling
-reader, whether the levelling wrapper picks the right conversion for real cadences, or whether
-the exchange reports itself honestly. Each of those has been wrong in a way a green unit suite
-did not notice.
+reader, whether a request against real asymmetric cadences resolves to the windows it should,
+or whether the exchange reports itself honestly. Each of those has been wrong in a way a green
+unit suite did not notice, which is why the provenance counts below assert numbers derived by
+hand from the configuration rather than anything read off a run.
 
 Must run on a GPU machine.
 
@@ -24,6 +25,7 @@ Must run on a GPU machine.
 """
 
 import logging
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -126,22 +128,76 @@ def test_the_summary_agrees_with_the_substitutions(coupled_run):
     assert "has no effect" not in coupled_run, "no coupling should be reported dead"
 
 
-def test_each_direction_levels_its_own_cadence(coupled_run):
-    """The two directions need different levelling, which is why this pair is asymmetric.
+# Where each component's forcing windows must come from, derived by hand from `coupled.yml`:
+# one sample, two 24 h chunks, an atmosphere at 6 h against an ocean at 24 h, both at the
+# default lag of one of the consumer's own windows.
+#
+# Ocean consumes ATMO. Its chunk is one 24 h step, so it makes two requests, each on a 24 h
+# window lagged 24 h: [t0, t0+24h) and [t0+24h, t0+48h). Four 6 h atmospheric windows start
+# inside each, so eight source windows in all. The one at t0 is the initialization window and
+# is primed from the atmosphere's own data; the other seven are predictions.
+#
+# Atmo consumes OCEAN. Four 6 h steps per chunk, eight requests, each on a 6 h window lagged
+# 6 h. No 24 h oceanic window starts inside a 6 h request except the first of each chunk, so
+# six of the eight are held from the window covering them. The first chunk's four resolve to
+# the init window and are primed; the second chunk's four to the ocean's first prediction.
+PROVENANCE = {
+    "Ocean": ("'ATMO' of 'Ocean'", 2, 7, 1, 0, 0),
+    "Atmo": ("'OCEAN' of 'Atmo'", 8, 4, 4, 0, 6),
+}
 
-    Atmo -> Ocean: the atmosphere produces 6-hourly and the ocean reads that stream 6-hourly,
-    so nothing is levelled -- the ocean's own `average_window` collapses the four samples in its
-    24 h window, exactly as it did in training.
 
-    Ocean -> Atmo: the ocean produces 24-hourly but the atmosphere was trained on a 6-hourly
-    field, so the coupling upsamples. Getting this backwards, or levelling when nothing needs
-    it, corrupts the forcing without failing anything else.
+@pytest.mark.parametrize("component", sorted(PROVENANCE))
+def test_every_forcing_window_is_accounted_for(coupled_run, component):
+    """The load-bearing assertion about the numbers rather than the wiring.
+
+    Every way this exchange can fail ends at the same climatological spoof behind the same
+    debug line, with every wiring assertion still green: a request resolved on the producer's
+    index space instead of the consumer's, a window the producer has not emitted, a lag that
+    reaches past what is stored. The counts distinguish them, and they are derivable by hand
+    from the configuration rather than read off a run.
     """
-    assert "Stream 'ATMO': producer and consumer both sample every 06:00:00" in coupled_run
-    assert "no levelling needed" in coupled_run
-    assert "Stream 'OCEAN': producer samples every 24:00:00" in coupled_run
-    assert "upsampling." in coupled_run
-    assert "averaging down" not in coupled_run
+    who, requests, predicted, primed, disk, held = PROVENANCE[component]
+    expected = (
+        f"Forcing {who}: {requests} request(s) -> {predicted} predicted, {primed} primed, "
+        f"{disk} from disk, 0 unresolved ({held} held from a covering window)."
+    )
+
+    assert expected in coupled_run, (
+        "provenance line missing or wrong; the run printed: "
+        + "; ".join(line for line in coupled_run.splitlines() if "Forcing " in line)
+    )
+
+
+def test_no_forcing_window_falls_through_to_a_spoof(coupled_run):
+    """An unresolved window is a silent substitution of climatology for a partner's state."""
+    assert "unresolved" not in coupled_run.replace("0 unresolved", "")
+
+
+def test_the_slow_component_gathers_the_fast_one(coupled_run):
+    """C2: one request on a 24 h window must resolve to the four emissions inside it.
+
+    The ocean's own `average_window` then collapses them, exactly as it did in training. An
+    exchange that returns one window per request instead leaves it averaging a single row --
+    a quarter of the forcing it was trained on, and no error anywhere. Read off the run rather
+    than off the table above, so this says something the count assertions do not.
+    """
+    line = next(
+        line for line in coupled_run.splitlines() if "Forcing 'ATMO' of 'Ocean'" in line
+    )
+    requests = int(re.search(r"(\d+) request", line).group(1))
+    resolved = sum(
+        int(n) for n in re.findall(r"(\d+) (?:predicted|primed|from disk)", line)
+    )
+
+    assert resolved == 4 * requests, f"four source windows per request, got: {line}"
+
+
+def test_each_direction_declares_its_lag(coupled_run):
+    """D4: the lag is validated against the step order, and both bounds are reported."""
+    assert "forcing_lag 24:00:00, at least 18:00:00 required" in coupled_run
+    assert "forcing_lag 06:00:00, at least 06:00:00 required" in coupled_run
+    assert "Step order, from couplings-file declaration order: ['Atmo', 'Ocean']." in coupled_run
 
 
 def test_each_component_writes_its_own_streams(coupled_run):

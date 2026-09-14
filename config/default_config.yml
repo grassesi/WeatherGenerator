@@ -198,6 +198,11 @@ training_config:
       num_steps: 2
       offset: 1
       policy: "fixed"
+      # Forecast steps per rollout tile. A rollout is stepped one tile at a time and only the
+      # current tile's activations are held, so this is what bounds what a long rollout costs
+      # in memory. null means one tile for the whole rollout, which is what training wants;
+      # a coupled run derives it from rollout.chunk_length instead.
+      chunk_size: null
 
 
 # validation config; full validation config is merge of training and validation config
