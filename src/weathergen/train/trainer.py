@@ -388,7 +388,11 @@ class Trainer(TrainerBase):
             if stream.info.get("is_dynamic_forcing", False)
         }
         self.dynamic_forcings = ForcingInput(
-            VAL, self.dataset.time_window_handler, forcing_streams, self.dataset_val.tokenizer
+            VAL,
+            self.dataset.time_window_handler,
+            forcing_streams,
+            self.dataset_val.tokenizer,
+            self.test_cfg.get("forecast", {}).get("offset", 1),
         )
 
         # make sure number of loaders does not exceed requested samples
@@ -621,7 +625,11 @@ class Trainer(TrainerBase):
             if stream.info.get("is_dynamic_forcing", False)
         }
         self.dynamic_forcings = ForcingInput(
-            TRAIN, self.dataset.time_window_handler, forcing_streams, self.dataset.tokenizer
+            TRAIN,
+            self.dataset.time_window_handler,
+            forcing_streams,
+            self.dataset.tokenizer,
+            self.training_cfg.get("forecast", {}).get("offset", 1),
         )
 
         # training loop

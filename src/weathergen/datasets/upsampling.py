@@ -40,8 +40,9 @@ from weathergen.datasets.data_reader_base import (
     ReaderData,
     TIndex,
     WrappedDataReader,
+    restamp,
 )
-from weathergen.datasets.geoinfo import computed_columns, recompute_geoinfos
+from weathergen.datasets.geoinfo import computed_columns
 
 _logger = logging.getLogger(__name__)
 
@@ -230,27 +231,12 @@ class UpsamplingReader(DataReaderTimestep, WrappedDataReader):
     def _restamp(self, rdata: ReaderData, source_idx: TIndex, target_idx: TIndex) -> ReaderData:
         """Move a source window's timestamps onto the requested window.
 
-        Shifts by the difference between the two window starts rather than overwriting, so
-        structure inside the window (several observation times, say) survives the move.
+        Both windows are on this reader's own handler, so the shift is the difference between
+        their starts. The move itself is `data_reader_base.restamp`, shared with the coupling
+        reader, which holds a coarse producer across finer request windows for the same reason.
         """
 
         handler = self.time_window_handler
         shift = handler.window(target_idx).start - handler.window(source_idx).start
 
-        # the wrapped reader may hand out its stored arrays; never mutate them in place
-        coords = rdata.coords.copy()
-        geoinfos = rdata.geoinfos.copy()
-        datetimes = (rdata.datetimes + np.asarray(shift)).copy()
-
-        # the served values keep their own time only in the sense that they are the last known
-        # state of the field; the geoinfos describe the window being served, so they follow the
-        # new stamps rather than the old ones
-        recompute_geoinfos(geoinfos, coords, datetimes, self._computed_geoinfos)
-
-        return ReaderData(
-            coords=coords,
-            geoinfos=geoinfos,
-            data=rdata.data.copy(),
-            datetimes=datetimes,
-            is_spoof=rdata.is_spoof,
-        )
+        return restamp(rdata, shift, self._computed_geoinfos)

@@ -19,6 +19,7 @@ from numpy import datetime64, timedelta64
 from numpy.typing import NDArray
 
 from weathergen.common.config import timedelta_to_str
+from weathergen.datasets.geoinfo import recompute_geoinfos
 from weathergen.utils.better_abc import ABCMeta, abstract_attribute
 
 _logger = logging.getLogger(__name__)
@@ -261,6 +262,54 @@ class ReaderData:
             data=self.data[idxs_subset],
             datetimes=self.datetimes[idxs_subset],
         )
+
+
+def shifted(handler: TimeWindowHandler, lag: NPTDel64) -> TimeWindowHandler:
+    """The same window geometry, every window moved `lag` earlier.
+
+    `shifted(h, L).window(i).start == h.window(i).start - L` for every `i`, which is what
+    turns a forcing lag into a property of the timeline a request is resolved on rather than
+    of the index the caller passes. The window length and step are untouched: a lag moves a
+    window, it does not resize it.
+    """
+
+    return TimeWindowHandler(
+        handler.t_start - lag,
+        handler.t_end - lag,
+        handler.t_window_len,
+        handler.t_window_step,
+    )
+
+
+def restamp(
+    rdata: ReaderData, shift: NPTDel64, computed_geoinfos: dict[int, object]
+) -> ReaderData:
+    """Move a window's timestamps by `shift`, recomputing the time-varying geoinfos.
+
+    Shifts rather than overwrites, so structure inside the window -- several observation
+    times, say -- survives the move. The geoinfos describe the window being served, so
+    insolation and the cyclic time terms follow the new stamps; everything else (z, lsm,
+    slor, sdor) is constant in time and is carried as it comes.
+
+    Shared by `UpsamplingReader`, which holds a coarse source across finer windows, and by
+    the coupling reader, which does the same for a forcing whose producer is coarser than
+    the window it is being asked for.
+    """
+
+    # the source may hand out its stored arrays; never mutate them in place
+    coords = rdata.coords.copy()
+    geoinfos = rdata.geoinfos.copy()
+    datetimes = (rdata.datetimes + np.asarray(shift)).copy()
+
+    recompute_geoinfos(geoinfos, coords, datetimes, computed_geoinfos)
+
+    return ReaderData(
+        coords=coords,
+        geoinfos=geoinfos,
+        data=rdata.data.copy(),
+        datetimes=datetimes,
+        is_spoof=rdata.is_spoof,
+    )
 
 
 def check_reader_data(rdata: ReaderData, dtr: DTRange) -> None:

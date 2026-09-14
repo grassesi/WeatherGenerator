@@ -4,15 +4,29 @@ from __future__ import annotations
 
 import dataclasses
 import itertools as it
+import logging
 from typing import Any
 
+import numpy as np
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from weathergen.common.config import Config
+from weathergen.common.config import Config, timedelta_to_str
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.batch import BatchSamples, SampleMetaData
-from weathergen.datasets.data_reader_base import DataReaderBase, DTRange, TimeWindowHandler
+from weathergen.datasets.coupling_reader import (
+    DataReaderCoupling,
+    ForcingProvenance,
+    forcing_lag,
+)
+from weathergen.datasets.data_reader_base import (
+    DataReaderBase,
+    DTRange,
+    TimeWindowHandler,
+    WrappedDataReader,
+    rebase_innermost,
+    shifted,
+)
 from weathergen.datasets.masking import MaskData
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
@@ -23,6 +37,15 @@ from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelOutput, ModelParams
 from weathergen.model.utils import get_num_parameters
 from weathergen.utils.utils import get_dtype
+
+_logger = logging.getLogger(__name__)
+
+
+def _innermost(reader: DataReaderBase) -> DataReaderBase:
+    """Walk a wrapper stack down to the reader that actually holds the data."""
+    while isinstance(reader, WrappedDataReader):
+        reader = reader._wrapped_reader
+    return reader
 
 
 class ForcedModel(Model):
@@ -67,7 +90,6 @@ class ForcedModel(Model):
 
         source_masks, source_sampling_idxs = self._get_source_masks_sample_idxs(source_samples)
 
-        forecast_offset = chunk.forecast_offset
         forecast_steps = chunk.steps
 
         output = ModelOutput(chunk, source_samples)
@@ -80,7 +102,12 @@ class ForcedModel(Model):
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
         final_step = source_samples.get_output_idxs()[-1]
         for step in forecast_steps:
-            forcing_idx = step - forecast_offset
+            # The window a step predicts, on this component's own timeline. The lag is not
+            # encoded here: each forcing stream is read on a handler already shifted by its own
+            # `forcing_lag`, so one expression serves every stream and every scheme. Multiplying
+            # by the stride is also the minimal correct form -- without it the lag grew linearly
+            # with the forecast step whenever `forecast.time_step > time_window_step`.
+            forcing_idx = step * chunk.step_stride
 
             if self.forcing_engine and not dynamic_forcings.is_empty:
                 # reembedd forcings
@@ -133,26 +160,104 @@ class ForcedModel(Model):
 
 
 class ForcingInput:
+    """The dynamic forcing streams of one component, and the timelines they are read on.
+
+    Every stream is read through a `DataReaderCoupling` -- with `is_forced=False` here, where
+    the rows come from the component's own dataset, and with a producer bound to it when a
+    `Coupler` later substitutes a partner's predictions. The two paths then differ in where the
+    numbers come from and in nothing else: the same lag, the same window arithmetic, the same
+    reduction by the stream's own wrappers (`forcing_lag_design.md` L7).
+    """
+
     def __init__(
         self,
         stage: str,
         time_window_handler: TimeWindowHandler,
         forcing_streams: dict[str, list[DataReaderBase]],
         tokenizer: TokenizerMasking,
+        forecast_offset: int = 1,
     ):
         self.stage = stage
         self.forcing_window_len = 1
-        self.forcing_streams = forcing_streams
         self.healpix_lvl = 5  # TODO infer from MSDS
         self.num_healpix_cells = 12 * 4**self.healpix_lvl
 
         self.time_window_handler = time_window_handler
         self.tokenizer = tokenizer
         self.tokenize_spacetime = True  # TODO hardcoded, do properly
+        self.forecast_offset = int(forecast_offset)
+
+        # Per stream, the timeline its requests are resolved on: this component's own handler
+        # shifted earlier by the stream's forcing lag. The tokenizer stamps the window the data
+        # actually came from, so it reads the same handler (L5).
+        self.lags: dict[str, np.timedelta64] = {}
+        self.stream_handlers: dict[str, TimeWindowHandler] = {}
+        self.provenance: dict[str, ForcingProvenance] = {}
+        self.forcing_streams = self._lag_streams(forcing_streams)
+
+    def _lag_streams(
+        self, forcing_streams: dict[str, list[DataReaderBase]]
+    ) -> dict[str, list[DataReaderBase]]:
+        """Read every stream through a coupling reader on its own lagged timeline.
+
+        A stream whose innermost reader has no sampling period -- an observation stream -- is
+        left on its own reader: the gathering a lag is resolved by needs a grid. Configuring a
+        lag on one is rejected rather than silently ignored.
+        """
+
+        lagged: dict[str, list[DataReaderBase]] = {}
+        window_step = self.time_window_handler.t_window_step
+
+        for stream, readers in forcing_streams.items():
+            stream_info = readers[0].stream_info if readers else {}
+            lag = forcing_lag(stream_info, window_step, self.forecast_offset)
+            default = np.timedelta64(self.forecast_offset * window_step, "ms")
+
+            self.lags[stream] = lag
+            self.stream_handlers[stream] = shifted(self.time_window_handler, lag)
+            self.provenance[stream] = ForcingProvenance(stream=stream)
+
+            periodic = [r for r in readers if getattr(_innermost(r), "period", None) is not None]
+            if len(periodic) != len(readers):
+                if lag != default:
+                    msg = (
+                        f"Stream '{stream}' sets forcing_lag {timedelta_to_str(lag)} but is not "
+                        "read from a gridded reader, so the window its rows would be gathered "
+                        "from is undefined."
+                    )
+                    raise ValueError(msg)
+                lagged[stream] = readers
+                continue
+
+            lagged[stream] = [
+                rebase_innermost(
+                    reader,
+                    lambda base, _s=stream: DataReaderCoupling(
+                        base,
+                        _s,
+                        request_handler=self.stream_handlers[_s],
+                        is_forced=False,
+                        provenance=self.provenance[_s],
+                    ),
+                )
+                for reader in readers
+            ]
+
+        for stream, lag in self.lags.items():
+            _logger.info(
+                f"Forcing stream '{stream}' is sampled {timedelta_to_str(lag)} before the "
+                "window it forces."
+            )
+
+        return lagged
 
     @property
     def is_empty(self) -> bool:
         return len(self.forcing_streams) == 0
+
+    def handler(self, stream: str) -> TimeWindowHandler:
+        """The lagged timeline `stream` is read on, falling back to the unlagged one."""
+        return self.stream_handlers.get(stream, self.time_window_handler)
 
     def get_data(
         self, sampling_idxs: list[int], meta_infos: list[dict[str, torch.Tensor]]
@@ -213,7 +318,9 @@ class ForcingInput:
         for step, idx in enumerate(  # TODO check correct semantics of step
             range(sampling_idx, sampling_idx - self.forcing_window_len, -1)
         ):
-            time_win_source = self.time_window_handler.window(idx)
+            # this stream's own lagged timeline, so the tokenizer stamps the window the data
+            # is actually from rather than the window it is a forcing for (L5)
+            time_win_source = self.handler(stream).window(idx)
 
             dataset_readers: list[DataReaderBase] = self.forcing_streams[stream]
             stream_info = dataset_readers[0].stream_info

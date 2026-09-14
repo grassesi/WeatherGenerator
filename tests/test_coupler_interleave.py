@@ -42,6 +42,11 @@ class FakeSourceSamples:
     def __init__(self, sample_idxs):
         self._samples = [FakeSample(i) for i in sample_idxs]
 
+    @property
+    def samples(self):
+        # what BatchSamples exposes, and what the Coupler reads the init window off
+        return self._samples
+
     def get_samples(self):
         return self._samples
 

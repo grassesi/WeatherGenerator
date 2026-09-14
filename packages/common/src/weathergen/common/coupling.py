@@ -8,26 +8,17 @@ from pathlib import Path
 import numpy as np
 import torch
 import tqdm
-from numpy.typing import NDArray
 from omegaconf import OmegaConf, open_dict
 
 import weathergen.common.config as config
 from weathergen.common.config import timedelta_to_str
 from weathergen.common.logger import init_loggers
-from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.batch import ModelBatch
+from weathergen.datasets.coupling_reader import DataReaderCoupling
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
-    DataReaderTimestep,
-    PassthroughReader,
-    ReaderData,
-    TimeWindowHandler,
-    TIndex,
     rebase_innermost,
 )
-from weathergen.datasets.tokenizer_utils import TIMES_WIDTH
-from weathergen.datasets.upsampling import UpsamplingReader
-from weathergen.model.chunking import ChunkInfo
 from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
 from weathergen.train.trainer import Trainer
@@ -38,6 +29,8 @@ from weathergen.train.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ZERO = np.timedelta64(0, "ms")
 
 
 @dataclasses.dataclass
@@ -292,6 +285,10 @@ class Coupler:
         self._fsteps_per_chunk: dict[str, int] = {}
         # producer -> readers waiting for its chunks
         self._subscribers: dict[str, list[DataReaderCoupling]] = {}
+        # component -> start of the current batch's initialization window, pushed into every
+        # reader that primes from it. It cannot be learned from the first dispatched chunk,
+        # because the first request precedes the first dispatch.
+        self._init_times: dict[str, np.datetime64] = {}
 
     def trainer(self, name: str) -> Trainer:
         return self._components[name][0]
@@ -302,6 +299,7 @@ class Coupler:
     def setup(self, devices, checkpoints: dict[str, ModelCheckpoint]) -> None:
         """Derive every component's rollout settings, then build them."""
         self._check_couplings()
+        self._names = self._step_order()
         self._derive_component_configs()
 
         for name in self._names:
@@ -321,7 +319,109 @@ class Coupler:
             trainer = self.trainer(name)
             trainer.dynamic_forcings = self.subscribe(name, self._pristine_forcings[name])
 
+        self._check_forcing_lags()
         self._announce_couplings()
+
+    def _step_order(self) -> list[str]:
+        """Components in the order they are stepped, from the couplings file (C3).
+
+        The producer of the first coupling is stepped first, so a consumer ordered after its
+        producer sees the chunk just dispatched and one ordered before it sees the previous
+        chunk. That is what makes the two directions of an asymmetric pairing fall out of the
+        order alone, with no staging slot and no chunk-index bookkeeping.
+
+        A component that produces nothing is stepped last. File order is as rank-deterministic
+        as the alphabetical order it replaces, so the collectives guarantee is untouched.
+        """
+
+        order: list[str] = []
+        for coupling in self._couplings.values():
+            if coupling.producer not in order:
+                order.append(coupling.producer)
+        for name in sorted(self._components):
+            if name not in order:
+                order.append(name)
+
+        logger.info(f"Step order, from couplings-file declaration order: {order}.")
+        return order
+
+    def _check_forcing_lags(self) -> None:
+        """Every source window a coupled request touches must exist when it is asked for.
+
+        With `len_c` the consumer's window length, `P` the producer's emission cadence and
+        `D` a whole chunk when the producer is stepped *after* the consumer, the lag must
+        satisfy `L >= len_c - P + D`. Below that the consumer reaches into a window its
+        producer has not emitted yet, which reads back as an absent forcing rather than as an
+        error (`forcing_lag_design.md` D4).
+        """
+
+        if self._rollout is None:
+            return
+
+        for coupling in self._couplings.values():
+            if coupling.consumer is None:
+                continue
+
+            forcings = self._pristine_forcings.get(coupling.consumer)
+            if forcings is None or coupling.stream not in forcings.lags:
+                continue
+
+            lag = forcings.lags[coupling.stream]
+            len_c = self._window_len(coupling.consumer)
+            cadence = self._emission_cadence(coupling.producer)
+            before = self._names.index(coupling.producer) < self._names.index(coupling.consumer)
+            slack = _ZERO if before else self._rollout.chunk_length
+            required = len_c - cadence + slack
+
+            where = (
+                f"Coupling {coupling.name!r} ({coupling.producer!r} -> {coupling.consumer!r}, "
+                f"stream {coupling.stream!r})"
+            )
+            if lag < required:
+                msg = (
+                    f"{where} declares forcing_lag {timedelta_to_str(lag)}, but the producer is "
+                    f"stepped {'before' if before else 'after'} the consumer, so a request "
+                    "reaches windows that do not exist yet unless the lag is at least "
+                    f"{timedelta_to_str(required)} (consumer window {timedelta_to_str(len_c)} "
+                    f"- producer cadence {timedelta_to_str(cadence)} + "
+                    f"{timedelta_to_str(slack)})."
+                )
+                raise ValueError(msg)
+
+            if lag > self._rollout.chunk_length:
+                msg = (
+                    f"{where} declares forcing_lag {timedelta_to_str(lag)}, longer than "
+                    f"rollout.chunk_length {timedelta_to_str(self._rollout.chunk_length)}. The "
+                    "reader keeps the current chunk and the one before it, so a longer lag "
+                    "reaches past what is stored."
+                )
+                raise ValueError(msg)
+
+            if cadence > _ZERO and lag % cadence != _ZERO:
+                logger.warning(
+                    f"{where} declares forcing_lag {timedelta_to_str(lag)}, which is not a "
+                    f"whole multiple of the producer's {timedelta_to_str(cadence)} cadence. "
+                    "The request lands between two emissions and is quantised to the window "
+                    "covering it."
+                )
+
+            logger.info(
+                f"{where}: forcing_lag {timedelta_to_str(lag)}, at least "
+                f"{timedelta_to_str(required)} required."
+            )
+
+    def _window_len(self, name: str) -> np.timedelta64:
+        """The component's own time window length, as its test config resolves it."""
+        _, _, test_cfg = resolve_stage_configs(self.config(name))
+        return config.parse_timedelta(test_cfg.get("time_window_len"))
+
+    def _emission_cadence(self, name: str) -> np.timedelta64:
+        """Wall-clock spacing of the windows this component emits, i.e. its forecast step."""
+        _, _, test_cfg = resolve_stage_configs(self.config(name))
+        time_step = test_cfg.get("forecast", {}).get("time_step")
+        if time_step is None:
+            return config.parse_timedelta(test_cfg.get("time_window_step"))
+        return config.parse_timedelta(time_step)
 
     # ------------------------------------------------------------------ checks
 
@@ -370,44 +470,6 @@ class Coupler:
             live[coupling.name] = coupling
 
         self._couplings = live
-
-    @staticmethod
-    def _level(
-        coupled: DataReaderCoupling, base: DataReaderBase, stream: str
-    ) -> DataReaderBase:
-        """Wrap the coupling reader so it emits at the consumer's own stream cadence.
-
-        The quantity compared is the spacing between consecutive samples on each side --
-        (window length) / (samples per window) -- which is exactly a reader's `period`. Not the
-        forecast step: a 24 h window reading a 6 h stream carries four samples, and the forecast
-        step says nothing about that.
-
-        Faster producer -> average down, slower producer -> upsample, equal -> nothing, made
-        explicit (coupling_reader_placement.md P6).
-        """
-
-        # both periods exist: DataReaderCoupling asserts that at construction, which runs first
-        produced, consumed = coupled.period, base.period
-
-        if produced == consumed:
-            logger.info(
-                f"Stream {stream!r}: producer and consumer both sample every "
-                f"{timedelta_to_str(consumed)}, no levelling needed."
-            )
-            return PassthroughReader(coupled)
-
-        if produced < consumed:
-            logger.info(
-                f"Stream {stream!r}: producer samples every {timedelta_to_str(produced)} against "
-                f"the consumer's {timedelta_to_str(consumed)}, averaging down."
-            )
-            return AveragingReader(coupled)
-
-        logger.info(
-            f"Stream {stream!r}: producer samples every {timedelta_to_str(produced)} against "
-            f"the consumer's {timedelta_to_str(consumed)}, upsampling."
-        )
-        return UpsamplingReader(coupled)
 
     def _producer_reader(self, producer: str, stream: str) -> DataReaderBase:
         """The producing component's own reader for `stream`.
@@ -680,8 +742,33 @@ class Coupler:
                 self._run_batch(self._next_batches(iters), bidx, mini_epoch)
                 pbar.update(1)
 
+        self._report_provenance()
+
         for name in self._names:
             self.trainer(name).finish_validation(mini_epoch)
+
+    def _report_provenance(self) -> None:
+        """Say where every forcing window a run served actually came from.
+
+        The cheapest assertion that kills the whole class of silent-exchange defects. Every
+        way the exchange can fail -- a request resolved on the wrong timeline, a window the
+        producer never emitted, a coupling that was never substituted -- ends at the same
+        climatological spoof, behind the same `logger.debug`, with every wiring assertion
+        still green. These counts distinguish them.
+        """
+
+        for name in self._names:
+            forcings = self._pristine_forcings.get(name)
+            if forcings is None or forcings.is_empty:
+                continue
+            for stream, provenance in forcings.provenance.items():
+                logger.info(provenance.describe(name))
+                if provenance.unresolved:
+                    logger.warning(
+                        f"Forcing '{stream}' of '{name}' left {provenance.unresolved} of "
+                        f"{provenance.requests + provenance.unresolved} source window(s) "
+                        "unresolved; each was replaced by a climatological spoof."
+                    )
 
     def _next_batches(self, iters) -> dict:
         """One batch per component."""
@@ -725,7 +812,7 @@ class Coupler:
     def _run_batch(self, batches: dict, bidx: int, mini_epoch: int) -> None:
         targets, plans, states, accumulated = {}, {}, {}, {}
 
-        self._resubscribe()
+        self._resubscribe(batches)
 
         # per-component preparation, in deterministic order
         for name in self._names:
@@ -830,19 +917,34 @@ class Coupler:
 
                 forecast_step_stride = 1 # TODO determine automatically (from chunkizes)
                 producer_reader = self._producer_reader(coupling.producer, stream)
+                init_time = self._init_times.get(coupling.producer)
                 built: list[DataReaderCoupling] = []
 
                 def _make_inner(base, _p=producer_reader, _s=stream, _b=built,
-                                _stride=forecast_step_stride):
+                                _stride=forecast_step_stride, _init=init_time):
+                    # The training path already read this stream through a coupling reader, on
+                    # the lagged timeline. Rebuild from the disk reader underneath it rather
+                    # than wrapping it, and keep its handler and its tally: the lag is the
+                    # model's, not the run's, and the counts have to span every trajectory.
+                    disk = base.disk_reader if isinstance(base, DataReaderCoupling) else base
+                    request_handler = (
+                        base.request_handler if isinstance(base, DataReaderCoupling) else None
+                    )
+                    provenance = (
+                        base.provenance if isinstance(base, DataReaderCoupling) else None
+                    )
                     coupled = DataReaderCoupling(
-                        base,
+                        disk,
                         _s,
                         producer=_p,
+                        request_handler=request_handler,
+                        is_forced=True,
+                        init_time=_init,
                         forecast_step_stride=_stride,
-                        # TODO point it exactly at initialization date
+                        provenance=provenance,
                     )
                     _b.append(coupled)
-                    return self._level(coupled, base, _s)
+                    return coupled
 
                 # innermost, so the stream's own wrappers apply to a coupled forcing exactly as
                 # they did in training, instead of being bypassed by it
@@ -868,7 +970,7 @@ class Coupler:
         forcings.forcing_streams = forcing_streams_coupled
         return forcings
 
-    def _resubscribe(self) -> None:
+    def _resubscribe(self, batches: dict) -> None:
         """Give every component fresh coupling readers, discarding the previous batch's.
 
         Each batch is a separate initialisation time, i.e. an independent trajectory, but a
@@ -876,10 +978,18 @@ class Coupler:
         trajectories overlap in wall-clock time -- a run started on Jan 1 covers Jan 2, and so
         does one started on Jan 2 -- so without this the second trajectory would read the
         first one's predictions for the shared windows, silently and with no error. Rebuilding
-        the readers from the pristine forcings drops the old windows and resets the priming,
-        so every trajectory bootstraps from ground truth exactly as the first one did.
+        the readers from the pristine forcings drops the old chunks, so every trajectory
+        bootstraps from ground truth exactly as the first one did.
+
+        It is also where each component's initialization window is read off the batch and
+        pushed into the readers that prime from it (G5): a window at or before that time is an
+        initial condition however far into the rollout it is requested, and the first request
+        of a trajectory precedes the first dispatch, so it cannot be captured from a chunk.
         """
 
+        self._init_times = {
+            name: self._init_time(name, batch) for name, batch in batches.items()
+        }
         self._subscribers.clear()
         for name in self._names:
             trainer = self.trainer(name)
@@ -887,6 +997,33 @@ class Coupler:
             if pristine is None:
                 continue
             trainer.dynamic_forcings = self.subscribe(name, pristine)
+
+    def _init_time(self, name: str, batch: ModelBatch) -> np.datetime64:
+        """Start of the window this batch's trajectory is initialized from.
+
+        Read off the batch rather than derived from the rollout spec: the sampler may have
+        moved the sample, and what the readers must agree with is the window the model was
+        actually handed. Batch size is one per component, so one date per batch is well
+        defined.
+        """
+
+        samples = batch.get_source_samples().samples
+        assert len(samples) == 1, (
+            f"Component {name!r} handed {len(samples)} source samples; coupled inference runs "
+            "at batch size 1, which is what makes one initialization time per batch."
+        )
+
+        idxs = {
+            stream_data.sample_idx
+            for stream_data in samples[0].streams_data.values()
+            if stream_data is not None
+        }
+        assert len(idxs) == 1, (
+            f"Component {name!r} sampled window indices {sorted(idxs)} in one batch; the "
+            "streams of a sample must share one initialization window."
+        )
+
+        return self.trainer(name).dataset.time_window_handler.window(next(iter(idxs))).start
 
     def dispatch_chunk(self, producer: str, chunk: ModelOutput, batch: ModelBatch) -> None:
         """Hand a finished rollout chunk to everything forced by producer.
@@ -896,421 +1033,3 @@ class Coupler:
         """
         for reader in self._subscribers.get(producer, ()):
             reader.add_chunk(chunk, batch)
-
-
-def _to_numpy(tensor) -> NDArray:
-    """Detach a tensor to a numpy array; pass numpy arrays through."""
-    if isinstance(tensor, torch.Tensor):
-        return tensor.detach().cpu().numpy()
-    return np.asarray(tensor)
-
-
-class DataReaderCoupling(DataReaderTimestep):
-    """Serve another component's predicted chunks as forcing input.
-
-    Implements only the interface required by ForcingInput: `stream_info`,
-    `get_source`, `normalize_source_channels`, `normalize_geoinfos` and
-    `get_geoinfo_size`. The consumer-side members those need (`source_idx`,
-    `mean`, `stdev`, `geoinfo_idx`, `mean_geoinfo`, `stdev_geoinfo`) are taken
-    from the consumer's own reader for the same stream, so a coupled forcing is
-    tokenized and normalized exactly like the real stream it stands in for.
-
-    Predictions arrive through `add_chunk` and are indexed by the time window
-    they are valid for. `get_source` translates the requested time index with
-    the consumer's own `TimeWindowHandler`, which keeps producer and consumer
-    aligned even when they do not share a dataset index origin. A window that
-    has not been produced (yet) reads back empty, which makes ForcingInput fall
-    back to spoofed forcing rather than fail -- the normal state at the first
-    rollout step, before the producer has run.
-    """
-
-    def __init__(
-        self,
-        dataset: DataReaderBase,
-        producer_stream: str,
-        producer: DataReaderBase | None = None,
-        producer_time_window_handler: TimeWindowHandler | None = None,
-        forecast_step_stride: int = 1,
-        max_pending_windows: int = 64,
-    ) -> None:
-        """
-        Parameters
-        ----------
-        dataset :
-            The consumer's own reader for this stream. Supplies the tokenization
-            and normalization context the prediction has to be dressed up in.
-        producer_stream :
-            Name the stream carries in the producing component, i.e. the key its
-            predictions are stored under in `ModelOutput.physical`.
-        producer :
-            The producing component's reader for the stream, used to bring its
-            predictions back to physical space. If omitted, producer and consumer
-            are assumed to share statistics for these channels.
-        producer_time_window_handler :
-            The producing component's time window handler. Defaults to the
-            consumer's, i.e. both components walk the same timeline.
-        forecast_step_stride :
-            Dataset indices advanced per forecast step on the producer side,
-            `forecast.time_step // time_window_step` of the producing sampler.
-        max_pending_windows :
-            Number of predicted windows kept before the oldest ones are dropped.
-
-        Returns
-        -------
-        None
-        """
-
-        super().__init__(dataset.time_window_handler, dataset.stream_info)
-
-        self._producer_stream = producer_stream
-        self._producer_twh = producer_time_window_handler or dataset.time_window_handler
-        self._stride = int(forecast_step_stride)
-        self._max_pending = int(max_pending_windows)
-        self._length = dataset.length()
-
-        # A coupled stream is gridded and periodic on both sides. That is an assumption, not
-        # something the type system enforces -- `DataReaderObs` has no period at all -- so it is
-        # asserted here, where the message can name the stream, rather than surfacing later as a
-        # missing attribute inside a wrapper.
-        for role, reader in (("consumer", dataset), ("producer", producer)):
-            if reader is not None and getattr(reader, "period", None) is None:
-                msg = (
-                    f"Coupled stream {producer_stream!r}: its {role} reader "
-                    f"{type(reader).__name__} is not periodic. Coupling compares the two sides' "
-                    "sampling periods to level their cadences, so both must be gridded readers "
-                    "with a period."
-                )
-                raise ValueError(msg)
-
-        # The reader stands on the PRODUCER's grid: its windows are the producer's windows and
-        # its period the producer's sampling period. Everything below the levelling wrapper is
-        # therefore on one grid -- predictions and primed ground truth alike -- and that wrapper
-        # alone converts to the consumer's cadence (coupling_reader_placement.md P6).
-        if producer is not None:
-            super().__init__(
-                producer.time_window_handler,
-                dataset.stream_info,
-                producer.data_start_time,
-                producer.data_end_time,
-                producer.period,
-            )
-
-        # consumer side: how ForcingInput will tokenize and normalize what we return
-        self.source_channels = list(dataset.source_channels)
-        self.source_idx = list(dataset.source_idx)
-        self.geoinfo_channels = list(dataset.geoinfo_channels)
-        self.geoinfo_idx = list(dataset.geoinfo_idx)
-        self.mean = dataset.mean
-        self.stdev = dataset.stdev
-        self.mean_geoinfo = dataset.mean_geoinfo
-        self.stdev_geoinfo = dataset.stdev_geoinfo
-
-        # a coupled forcing stream is never a prediction target of its consumer
-        self.target_channels = []
-        self.target_idx = []
-        self.target_channel_weights = []
-
-        self._resolve_producer_columns(dataset, producer)
-
-        # One producer prediction per valid time, held in the data model a reader hands
-        # out. `data` and `geoinfos` are physical and already ordered like the consumer's
-        # source channels, so ForcingInput normalizes them with the consumer's own
-        # statistics exactly as it would data read from disk. The geoinfos are the
-        # producer's own, recovered from its target tokens -- never a stand-in, there is
-        # no correct substitute for them here.
-        self._windows: dict[np.datetime64, ReaderData] = {}
-
-        # The consumer's own reader, kept only for the metadata mirrored above.
-        self._dataset = dataset
-        # Windows the producer has not emitted *yet* are primed from the PRODUCER's target data:
-        # a primed window has to be the same quantity a prediction is, on the same grid and
-        # selectable by the same channel map, or priming and prediction reach the consumer by
-        # two independent routes that agree only by coincidence.
-        self._producer = producer
-        self._dispatched = 0
-
-        # where the producer's geoinfos sit in the target tokens it hands over
-        offset = 1 + TIMES_WIDTH
-        offered = len(self._geoinfo_channels_offered)
-        self._geoinfo_slice = slice(offset, offset + offered)
-
-    def _resolve_producer_columns(
-        self, dataset: DataReaderBase, producer: DataReaderBase | None
-    ) -> None:
-        """Check the producer supplies what the consumer needs, and say which columns to take.
-
-        Both halves of a window go through this: the data channels the consumer sources, and
-        the geoinfos that travel with them. Neither has to match the producer column for
-        column -- the consumer's channels only have to be a *subset* of what the producer
-        offers, and are selected by name. An ocean predicting only `sst` can force an
-        atmosphere that sources only `sst`; an atmosphere predicting seventy channels can
-        force an ocean that sources three of them.
-        """
-
-        stats = producer if producer is not None else dataset
-        if producer is None:
-            # producer and consumer are assumed to share statistics for these channels
-            data_channels, data_idx = list(dataset.source_channels), list(dataset.source_idx)
-        else:
-            data_channels, data_idx = list(producer.target_channels), list(producer.target_idx)
-
-        self._pred_cols, self._pred_mean, self._pred_stdev = self._select_columns(
-            "channels",
-            needed=list(self.source_channels),
-            offered=data_channels,
-            # `mean`/`stdev` are indexed by dataset channel, reached through the offered idx
-            mean_of=lambda col: stats.mean[data_idx[col]],
-            stdev_of=lambda col: stats.stdev[data_idx[col]],
-            guard_zero_stdev=False,
-        )
-
-        # what the producer writes into its target tokens, which sets the slice width
-        self._geoinfo_channels_offered = list(stats.geoinfo_channels or [])
-
-        self._geo_cols, self._geo_mean, self._geo_stdev = self._select_columns(
-            "geoinfo channels",
-            needed=list(self.geoinfo_channels or []),
-            offered=self._geoinfo_channels_offered,
-            # `mean_geoinfo`/`stdev_geoinfo` are indexed by position, as normalize_geoinfos does
-            mean_of=lambda col: stats.mean_geoinfo[col],
-            stdev_of=lambda col: stats.stdev_geoinfo[col],
-            guard_zero_stdev=True,
-        )
-
-    def _select_columns(
-        self,
-        kind: str,
-        needed: list[str],
-        offered: list[str],
-        mean_of,
-        stdev_of,
-        guard_zero_stdev: bool,
-    ) -> tuple[NDArray, NDArray, NDArray]:
-        """Positions of `needed` within `offered`, with the statistics to denormalize them."""
-
-        missing = [ch for ch in needed if ch not in offered]
-        if missing:
-            msg = (
-                f"Coupled stream '{self._producer_stream}' does not supply the {kind} its "
-                f"consumer needs as forcing: missing {missing}, offered {offered}."
-            )
-            raise ValueError(msg)
-
-        cols = np.asarray([offered.index(ch) for ch in needed], dtype=np.int64)
-        mean = np.asarray([mean_of(col) for col in cols], dtype=np.float32)
-        stdev = np.asarray([stdev_of(col) for col in cols], dtype=np.float32)
-        if guard_zero_stdev:
-            # constant fields are centered but not scaled; mirrors normalize_geoinfos
-            stdev = np.where(np.isclose(stdev, 0.0), 1.0, stdev)
-
-        return cols, mean, stdev
-
-    def _slice_geoinfos(self, source_data, fstep: int, num_points: int) -> NDArray:
-        """Recover the producer's geoinfos for one forecast step from its source tokens.
-
-        Requires the column layout to not have changed.
-        """
-
-        coords_local = source_data.target_coords[fstep]
-        geoinfos = _to_numpy(coords_local[..., self._geoinfo_slice])
-
-        expected = (num_points, len(self._geoinfo_channels_offered))
-        assert geoinfos.shape == expected, (
-            f"Coupled stream '{self._producer_stream}': sliced geoinfos of shape "
-            f"{geoinfos.shape} at forecast step {fstep}, expected {expected}. Rows come from "
-            "the source sample's tokenized target coords and points from the target sample's "
-            "raw ones, so a row mismatch means the two no longer describe the same points; a "
-            "column mismatch means get_target_coords_local's layout moved away from "
-            "TIMES_WIDTH."
-        )
-
-        # take the consumer's subset, then back to physical space; the consumer normalizes
-        # again with its own statistics, exactly as it would for data read from disk
-        return geoinfos[:, self._geo_cols] * self._geo_stdev + self._geo_mean
-
-    def length(self) -> int:
-        """Length of the timeline this reader is defined on, not of what it holds."""
-        return self._length
-
-    def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
-        """Serve one window of the producer's grid: its prediction, or its ground truth.
-
-        `idx` is an index into the producer's own timeline, because that is the grid this reader
-        stands on. The levelling wrapper above converts to whatever the consumer asks for; nothing
-        here knows or cares what that cadence is.
-        """
-
-        valid_time = self.time_window_handler.window(idx).start
-        window = self._windows.get(valid_time)
-
-        if window is not None:
-            # A window is served once per consumer of it, so never hand out the stored arrays
-            return window.copy()
-
-        if self._dispatched == 0:
-            # Bootstrap. The producer is stepped inside the same chunk loop as the consumer, so
-            # on the first chunk one direction of the exchange necessarily has nothing to hand
-            # over yet. Serving a spoof there feeds the model a field that is not merely stale
-            # but absent, at the one step the whole rollout is conditioned on. The producer's own
-            # ground truth for that window is what it would have predicted, and is what an
-            # uncoupled run would have read.
-            logger.debug(
-                f"Priming stream '{self._producer_stream}' at {valid_time} (index {idx}) from "
-                "the producer's target data: no chunk has been dispatched yet."
-            )
-            return self._prime(idx)
-
-        logger.debug(
-            f"No chunk for stream '{self._producer_stream}' at {valid_time} (index {idx}), "
-            "forcing falls back to spoof."
-        )
-        return ReaderData.empty(len(self.source_idx), len(self.geoinfo_idx))
-
-    def _prime(self, idx: TIndex) -> ReaderData:
-        """The producer's ground truth for a window, dressed as the consumer's source.
-
-        Runs through the same `_pred_cols` map a prediction does, so the two paths differ only in
-        where the numbers came from.
-        """
-
-        if self._producer is None:
-            # no producer to read from: fall back to the consumer's own view of the stream
-            return self._dataset.get_source(idx)
-
-        rdata = self._producer.get_target(idx)
-        if rdata.is_empty():
-            return ReaderData.empty(len(self.source_idx), len(self.geoinfo_idx))
-
-        data = rdata.data[:, self._pred_cols]
-        geoinfos = rdata.geoinfos[:, self._geo_cols] if len(self._geo_cols) else rdata.geoinfos
-        return dataclasses.replace(rdata, data=data, geoinfos=geoinfos)
-
-    def add_chunk(self, chunk: ModelOutput, batch: ModelBatch) -> None:
-        """Index the predictions of one rollout chunk by the time they are valid for.
-
-        `batch` is needed because a ModelOutput carries only the predicted values: the
-        coordinates, times and geoinfos they live on sit on the batch's samples, split
-        across the source and target halves as `_lower_prediction` describes.
-        """
-
-        tile = self._producer_tile(chunk)
-
-        for fstep in chunk.forecast_steps:
-            preds = chunk.get_physical_prediction(chunk.chunk_idx(fstep), self._producer_stream)
-            if preds is None:
-                # leading empty steps of the first chunk, or a stream without a decoder
-                continue
-
-            for i_source, pred in enumerate(preds):
-                entry = self._lower_prediction(
-                    chunk.batch_idx(fstep), i_source, pred, batch, tile
-                )
-                valid_time, window = entry
-                self._windows[valid_time] = window
-
-        self._dispatched += 1
-        self._evict()
-
-    def _producer_tile(self, chunk: ModelOutput) -> ChunkInfo | None:
-        """The producer's own description of the chunk it just emitted.
-
-        The timeline a prediction is stamped on and the stride between its forecast steps
-        belong to the *producing* component. They used to be constructor arguments of this
-        reader, which is how they came to be left unset: `subscribe()` fills three of six.
-        Riding along inside the ModelOutput, they cannot be forgotten -- so prefer them, and
-        fall back to what the constructor was given only when a chunk carries no tile.
-        """
-
-        tile = getattr(chunk, "chunk", None)
-        if tile is None or tile.time_window_handler is None:
-            return None
-
-        return tile
-
-    def _lower_prediction(
-        self,
-        fstep: int,
-        i_source: int,
-        pred: torch.Tensor,
-        batch: ModelBatch,
-        tile: ChunkInfo | None = None,
-    ) -> tuple[np.datetime64, ReaderData]:
-        """Pair one prediction with its target geometry and bring it to physical space.
-
-        The geometry is split across two samples, so both are needed. `target_coords_raw`,
-        `target_times_raw` and `idxs_inv` are written only by `add_target_values`, which runs
-        under `target_select`; the tokenized `target_coords` the geoinfos are recovered from
-        is written only by `add_target_coords`, which runs under `source_select`
-        (`multi_stream_data_sampler.py:694-697`). Neither sample carries both halves -- the
-        other half is left at its empty `StreamData.__init__` default, so reading it off the
-        wrong sample yields nothing rather than raising.
-
-        Zipping the two rests on their rows describing the same points in the same order,
-        which holds because both are tokenized from the same windows under the same target
-        mask. Nothing states that invariant, so the row count is checked below.
-        """
-
-        i_target = batch.get_target_idx_for_source(i_source)
-        stream_data = batch.get_target_sample(i_target).streams_data.get(self._producer_stream)
-        if (
-            stream_data is None
-            or stream_data.is_spoof(fstep)
-            or len(stream_data.target_coords_raw[fstep]) == 0
-        ):
-            raise ValueError("Cannot pair prediction with its target geometry")
-
-        source_data = batch.get_source_sample(i_source).streams_data.get(self._producer_stream)
-        if source_data is None:
-            raise ValueError(
-                f"Coupled stream '{self._producer_stream}' has no source sample {i_source}, so "
-                "the geoinfos its prediction carries cannot be recovered."
-            )
-
-        coords = _to_numpy(stream_data.target_coords_raw[fstep])
-        times = np.asarray(stream_data.target_times_raw[fstep])
-        geoinfos = self._slice_geoinfos(source_data, fstep, len(coords))
-
-        # ensemble members are equivalent forcings, use their mean
-        data = pred.mean(dim=0).to(torch.float32).detach().cpu().numpy()
-
-        assert data.shape[0] == coords.shape[0] == times.shape[0], (
-            f"Prediction for '{self._producer_stream}' at step {fstep} has {data.shape[0]} points "
-            f"but {coords.shape[0]} coordinates and {times.shape[0]} times."
-        )
-
-        # restore the ordering of the original data, as the output writer does
-        idxs_inv = stream_data.idxs_inv[fstep]
-        if len(idxs_inv) > 0:
-            idxs_inv = _to_numpy(idxs_inv)
-            data, coords, times = data[idxs_inv], coords[idxs_inv], times[idxs_inv]
-            geoinfos = geoinfos[idxs_inv]
-
-        # select the channels the consumer expects and denormalize them
-        data = data[:, self._pred_cols] * self._pred_stdev + self._pred_mean
-
-        if tile is not None:
-            valid_idx = tile.window_idx(stream_data.sample_idx, fstep)
-            valid_time = tile.time_window_handler.window(valid_idx).start
-        else:
-            valid_idx = stream_data.sample_idx + fstep * self._stride
-            valid_time = self._producer_twh.window(valid_idx).start
-
-        return valid_time, ReaderData(
-            coords=coords.astype(np.float32),
-            geoinfos=geoinfos.astype(np.float32),
-            data=data.astype(np.float32),
-            datetimes=times.astype("datetime64[ns]"),
-        )
-
-    def _evict(self) -> None:
-        """Drop the oldest windows once more than max_pending_windows are held."""
-        excess = len(self._windows) - self._max_pending
-        if excess <= 0:
-            return
-        for valid_time in sorted(self._windows)[:excess]:
-            del self._windows[valid_time]
-    
-    def reset(self): # duplicates resubsribe()
-        """Reset the stream for running the next batch => next initialization time."""
-        del self._windows
-        self._windows = {}
