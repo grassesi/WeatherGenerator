@@ -123,3 +123,18 @@ def test_geoinfo_width_matches_what_the_reader_declares(reader):
     assert rdata.geoinfos.shape[-1] == len(reader.geoinfo_channels)
     assert rdata.geoinfos.shape[-1] == len(reader.geoinfo_idx)
     reader.normalize_geoinfos(rdata.geoinfos)
+
+
+def test_an_empty_window_averages_to_an_empty_window(reader):
+    """Reading empty is normal: past the end of the data, or a window a producer has not emitted.
+
+    This reader sits above the coupling reader on a coupled stream, so an unproduced window
+    reaches it as empty rather than as an error.
+    """
+    reader._wrapped_reader._get = lambda idx, channels_idx: ReaderData.empty(
+        len(channels_idx), len(GEOINFOS)
+    )
+
+    rdata = reader._get(np.int64(0), [0])
+
+    assert rdata.is_empty()

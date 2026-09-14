@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from omegaconf import OmegaConf, open_dict
 
 import weathergen.common.config as config
+from weathergen.common.config import timedelta_to_str
 from weathergen.common.logger import init_loggers
 from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.batch import ModelBatch
@@ -397,21 +398,21 @@ class Coupler:
 
         if produced == consumed:
             logger.info(
-                f"Stream {stream!r}: producer and consumer both sample every {consumed}, "
-                "no levelling needed."
+                f"Stream {stream!r}: producer and consumer both sample every "
+                f"{timedelta_to_str(consumed)}, no levelling needed."
             )
             return PassthroughReader(coupled)
 
         if produced < consumed:
             logger.info(
-                f"Stream {stream!r}: producer samples every {produced} against the consumer's "
-                f"{consumed}, averaging down."
+                f"Stream {stream!r}: producer samples every {timedelta_to_str(produced)} against "
+                f"the consumer's {timedelta_to_str(consumed)}, averaging down."
             )
             return AveragingReader(coupled)
 
         logger.info(
-            f"Stream {stream!r}: producer samples every {produced} against the consumer's "
-            f"{consumed}, upsampling."
+            f"Stream {stream!r}: producer samples every {timedelta_to_str(produced)} against "
+            f"the consumer's {timedelta_to_str(consumed)}, upsampling."
         )
         return UpsamplingReader(coupled)
 

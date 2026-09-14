@@ -73,6 +73,12 @@ class AveragingReader(DataReaderTimestep, WrappedDataReader):
         <interval len> hours at time <end>.
         """
         rdata = self._wrapped_reader._get(idx, channels_idx)
+        if rdata.is_empty():
+            # An empty window has nothing to average, and `datetimes.max()` on a zero-size array
+            # raises. Reading empty is a normal state, not a defect: a window past the end of the
+            # data, or -- for a coupled stream, where this reader sits above the coupling reader
+            # -- a window the producer has not emitted.
+            return rdata
         max_time_idx = np.argwhere(rdata.datetimes == rdata.datetimes.max())
 
         data = (
