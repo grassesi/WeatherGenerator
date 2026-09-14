@@ -9,7 +9,13 @@ from numpy.typing import NDArray
 
 from weathergen.common.coupling import Coupler, Coupling, DataReaderCoupling
 from weathergen.datasets.batch import ModelBatch, SampleMetaData
-from weathergen.datasets.data_reader_base import DataReaderBase, ReaderData, TimeWindowHandler
+from weathergen.datasets.data_reader_base import (
+    DataReaderTimestep,
+    PassthroughReader,
+    ReaderData,
+    TimeWindowHandler,
+    WrappedDataReader,
+)
 from weathergen.datasets.stream_data import StreamData
 from weathergen.datasets.tokenizer_utils import TIMES_WIDTH, VERTEX_WIDTH
 from weathergen.model.chunking import ChunkInfo
@@ -40,11 +46,17 @@ def _target_tokens(geoinfos: NDArray[np.float32]) -> torch.Tensor:
     return tokens
 
 
-class FakeReader(DataReaderBase):
+class FakeReader(DataReaderTimestep):
     """Stand-in for the consumer's own reader for the coupled stream."""
 
     def __init__(self, twh: TimeWindowHandler) -> None:
-        super().__init__(twh, {"stream_id": 0, "token_size": 4, "tokenize_spacetime": False})
+        super().__init__(
+            twh,
+            {"stream_id": 0, "token_size": 4, "tokenize_spacetime": False},
+            np.datetime64("2023-01-01T00:00"),
+            np.datetime64("2023-12-31T00:00"),
+            np.timedelta64(6, "h"),
+        )
         # variable table: two data channels followed by one geoinfo channel
         self.source_channels = ["sst", "sea_ice"]
         self.source_idx = [0, 1]
@@ -98,6 +110,13 @@ def coords() -> NDArray[np.float32]:
     return np.stack(
         [np.linspace(-80, 80, N_POINTS), np.linspace(-170, 170, N_POINTS)], axis=-1
     ).astype(np.float32)
+
+
+def _innermost(reader):
+    """Walk a stack down to the reader at the bottom."""
+    while isinstance(reader, WrappedDataReader):
+        reader = reader._wrapped_reader
+    return reader
 
 
 class FakeStreamData:
@@ -376,7 +395,11 @@ def test_coupler_substitutes_only_coupled_streams(consumer, chunk, time_window_h
     subscribed = coupler.subscribe("ocean", forcings)
     streams = subscribed.forcing_streams
 
-    assert isinstance(streams[STREAM][0], DataReaderCoupling)
+    # the coupling reader is innermost now, under whatever levelling wrapper the cadences call
+    # for, so the substitution is not visible from the outermost reader's type -- which is the
+    # same trap _announce_couplings fell into twice
+    assert isinstance(streams[STREAM][0], PassthroughReader), "cadences match, so no levelling"
+    assert isinstance(_innermost(streams[STREAM][0]), DataReaderCoupling)
     # a stream no coupling names is left on its own reader
     assert streams["era5"][0] is consumer
 

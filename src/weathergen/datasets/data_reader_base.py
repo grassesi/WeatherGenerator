@@ -342,6 +342,24 @@ class WrappedDataReader:
         return clone
 
 
+class PassthroughReader(WrappedDataReader):
+    """A wrapper that changes nothing, used where a slot must exist but has no work to do.
+
+    The coupled path always carries a levelling wrapper between the coupling reader and the
+    stream's own wrappers, even when the two cadences already agree. Keeping the slot filled
+    means the stack has one shape regardless of the pairing, so anything walking it can be
+    written once, and "no levelling was needed" is visible rather than indistinguishable from
+    "levelling was forgotten".
+    """
+
+    def __init__(self, wrapped_reader: "DataReaderBase") -> None:
+        self._wrapped_reader = wrapped_reader
+
+    def __getattr__(self, name: str):
+        # only reached for attributes this class does not define itself
+        return getattr(self._wrapped_reader, name)
+
+
 def rebase_innermost(
     reader: "DataReaderBase", make_inner: Callable[["DataReaderBase"], "DataReaderBase"]
 ) -> "DataReaderBase":

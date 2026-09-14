@@ -13,15 +13,19 @@ from omegaconf import OmegaConf, open_dict
 
 import weathergen.common.config as config
 from weathergen.common.logger import init_loggers
+from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
     DataReaderTimestep,
+    PassthroughReader,
     ReaderData,
     TimeWindowHandler,
     TIndex,
+    rebase_innermost,
 )
 from weathergen.datasets.tokenizer_utils import TIMES_WIDTH
+from weathergen.datasets.upsampling import UpsamplingReader
 from weathergen.model.chunking import ChunkInfo
 from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
@@ -365,6 +369,51 @@ class Coupler:
             live[coupling.name] = coupling
 
         self._couplings = live
+
+    @staticmethod
+    def _level(
+        coupled: DataReaderCoupling, base: DataReaderBase, stream: str
+    ) -> DataReaderBase:
+        """Wrap the coupling reader so it emits at the consumer's own stream cadence.
+
+        The quantity compared is the spacing between consecutive samples on each side --
+        (window length) / (samples per window) -- which is exactly a reader's `period`. Not the
+        forecast step: a 24 h window reading a 6 h stream carries four samples, and the forecast
+        step says nothing about that.
+
+        Faster producer -> average down, slower producer -> upsample, equal -> nothing, made
+        explicit (coupling_reader_placement.md P6).
+        """
+
+        produced = getattr(coupled, "period", None)
+        consumed = getattr(base, "period", None)
+        if produced is None or consumed is None:
+            msg = (
+                f"Coupled stream {stream!r} cannot be levelled: "
+                f"producer period={produced}, consumer period={consumed}. Both sides must be "
+                "periodic for the cadences to be comparable."
+            )
+            raise ValueError(msg)
+
+        if produced == consumed:
+            logger.info(
+                f"Stream {stream!r}: producer and consumer both sample every {consumed}, "
+                "no levelling needed."
+            )
+            return PassthroughReader(coupled)
+
+        if produced < consumed:
+            logger.info(
+                f"Stream {stream!r}: producer samples every {produced} against the consumer's "
+                f"{consumed}, averaging down."
+            )
+            return AveragingReader(coupled)
+
+        logger.info(
+            f"Stream {stream!r}: producer samples every {produced} against the consumer's "
+            f"{consumed}, upsampling."
+        )
+        return UpsamplingReader(coupled)
 
     def _producer_reader(self, producer: str, stream: str) -> DataReaderBase:
         """The producing component's own reader for `stream`.
@@ -777,16 +826,37 @@ class Coupler:
         for stream, readers in forcing_streams.items():
             coupling = coupled.get(stream)
             if coupling is not None:
+                if len(readers) > 1:
+                    msg = (
+                        f"Coupled stream {stream!r} of component {consumer!r} has "
+                        f"{len(readers)} readers. A producer replaces a stream, not one of its "
+                        "files, so which reader to rebase is undefined."
+                    )
+                    raise ValueError(msg)
+
                 forecast_step_stride = 1 # TODO determine automatically (from chunkizes)
-                reader = DataReaderCoupling(
-                    readers[0], # TODO what if multiple readers?
-                    stream,
-                    producer=self._producer_reader(coupling.producer, stream),
-                    forecast_step_stride=forecast_step_stride,
-                    # TODO point it exactly at initialization date
-                )
-                # register coupling for producer: this is the reader add_chunk belongs to
-                self._subscribers.setdefault(coupling.producer, []).append(reader)
+                producer_reader = self._producer_reader(coupling.producer, stream)
+                built: list[DataReaderCoupling] = []
+
+                def _make_inner(base, _p=producer_reader, _s=stream, _b=built,
+                                _stride=forecast_step_stride):
+                    coupled = DataReaderCoupling(
+                        base,
+                        _s,
+                        producer=_p,
+                        forecast_step_stride=_stride,
+                        # TODO point it exactly at initialization date
+                    )
+                    _b.append(coupled)
+                    return self._level(coupled, base, _s)
+
+                # innermost, so the stream's own wrappers apply to a coupled forcing exactly as
+                # they did in training, instead of being bypassed by it
+                reader = rebase_innermost(readers[0], _make_inner)
+
+                # register coupling for producer: add_chunk belongs to the coupling reader
+                # itself, not to whatever now wraps it
+                self._subscribers.setdefault(coupling.producer, []).append(built[0])
 
                 # once per run, not once per batch: the readers are rebuilt for every
                 # trajectory, but the wiring they describe is the same every time, and this
