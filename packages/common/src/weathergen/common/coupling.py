@@ -16,6 +16,7 @@ from weathergen.common.logger import init_loggers
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
+    DataReaderTimestep,
     ReaderData,
     TimeWindowHandler,
     TIndex,
@@ -840,7 +841,7 @@ def _to_numpy(tensor) -> NDArray:
     return np.asarray(tensor)
 
 
-class DataReaderCoupling(DataReaderBase):
+class DataReaderCoupling(DataReaderTimestep):
     """Serve another component's predicted chunks as forcing input.
 
     Implements only the interface required by ForcingInput: `stream_info`,
@@ -903,6 +904,19 @@ class DataReaderCoupling(DataReaderBase):
         self._max_pending = int(max_pending_windows)
         self._length = dataset.length()
 
+        # The reader stands on the PRODUCER's grid: its windows are the producer's windows and
+        # its period the producer's sampling period. Everything below the levelling wrapper is
+        # therefore on one grid -- predictions and primed ground truth alike -- and that wrapper
+        # alone converts to the consumer's cadence (coupling_reader_placement.md P6).
+        if producer is not None:
+            super().__init__(
+                producer.time_window_handler,
+                dataset.stream_info,
+                getattr(producer, "data_start_time", None),
+                getattr(producer, "data_end_time", None),
+                getattr(producer, "period", None),
+            )
+
         # consumer side: how ForcingInput will tokenize and normalize what we return
         self.source_channels = list(dataset.source_channels)
         self.source_idx = list(dataset.source_idx)
@@ -928,10 +942,13 @@ class DataReaderCoupling(DataReaderBase):
         # no correct substitute for them here.
         self._windows: dict[np.datetime64, ReaderData] = {}
 
-        # The consumer's own on-disk reader for this stream, kept so that windows the
-        # producer has not emitted *yet* can be primed with ground truth instead of a spoof.
-        # Only used before the first chunk is dispatched: see get_source.
+        # The consumer's own reader, kept only for the metadata mirrored above.
         self._dataset = dataset
+        # Windows the producer has not emitted *yet* are primed from the PRODUCER's target data:
+        # a primed window has to be the same quantity a prediction is, on the same grid and
+        # selectable by the same channel map, or priming and prediction reach the consumer by
+        # two independent routes that agree only by coincidence.
+        self._producer = producer
         self._dispatched = 0
 
         # where the producer's geoinfos sit in the target tokens it hands over
@@ -1038,50 +1055,57 @@ class DataReaderCoupling(DataReaderBase):
         return self._length
 
     def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
-        raise NotImplementedError(
-            "DataReaderCoupling serves predicted chunks, not stored data; use get_source()."
-        )
+        """Serve one window of the producer's grid: its prediction, or its ground truth.
 
-    def get_source(self, idx: TIndex) -> ReaderData:
-        """
-        Get the prediction valid for time window idx
-
-        Parameters
-        ----------
-        idx : int
-            Index of temporal window
-
-        Returns
-        -------
-        source data, empty if no chunk covering idx has been dispatched yet
+        `idx` is an index into the producer's own timeline, because that is the grid this reader
+        stands on. The levelling wrapper above converts to whatever the consumer asks for; nothing
+        here knows or cares what that cadence is.
         """
 
         valid_time = self.time_window_handler.window(idx).start
         window = self._windows.get(valid_time)
 
-        if window is None and self._dispatched == 0:
-            # Bootstrap. The producer is stepped inside the same chunk loop as the consumer,
-            # so on the first chunk one direction of the exchange necessarily has nothing to
-            # hand over yet. Serving the spoof there feeds the model a field that is not
-            # merely stale but absent, at the one step whose state the whole rollout is
-            # conditioned on. The ground truth for that window is the right answer and is
-            # what an uncoupled run would use, so prime with it and let the exchange take
-            # over from the first dispatched chunk onwards.
+        if window is not None:
+            # A window is served once per consumer of it, so never hand out the stored arrays
+            return window.copy()
+
+        if self._dispatched == 0:
+            # Bootstrap. The producer is stepped inside the same chunk loop as the consumer, so
+            # on the first chunk one direction of the exchange necessarily has nothing to hand
+            # over yet. Serving a spoof there feeds the model a field that is not merely stale
+            # but absent, at the one step the whole rollout is conditioned on. The producer's own
+            # ground truth for that window is what it would have predicted, and is what an
+            # uncoupled run would have read.
             logger.debug(
-                f"Priming stream '{self._producer_stream}' at {valid_time} (index {idx}) "
-                "from ground truth: the producer has not dispatched a chunk yet."
+                f"Priming stream '{self._producer_stream}' at {valid_time} (index {idx}) from "
+                "the producer's target data: no chunk has been dispatched yet."
             )
+            return self._prime(idx)
+
+        logger.debug(
+            f"No chunk for stream '{self._producer_stream}' at {valid_time} (index {idx}), "
+            "forcing falls back to spoof."
+        )
+        return ReaderData.empty(len(self.source_idx), len(self.geoinfo_idx))
+
+    def _prime(self, idx: TIndex) -> ReaderData:
+        """The producer's ground truth for a window, dressed as the consumer's source.
+
+        Runs through the same `_pred_cols` map a prediction does, so the two paths differ only in
+        where the numbers came from.
+        """
+
+        if self._producer is None:
+            # no producer to read from: fall back to the consumer's own view of the stream
             return self._dataset.get_source(idx)
 
-        if window is None:
-            logger.debug(
-                f"No chunk for stream '{self._producer_stream}' at {valid_time} (index {idx}), "
-                "forcing falls back to spoof."
-            )
+        rdata = self._producer.get_target(idx)
+        if rdata.is_empty():
             return ReaderData.empty(len(self.source_idx), len(self.geoinfo_idx))
 
-        # A window is served once per consumer of it, so never hand out the stored arrays
-        return window.copy()
+        data = rdata.data[:, self._pred_cols]
+        geoinfos = rdata.geoinfos[:, self._geo_cols] if len(self._geo_cols) else rdata.geoinfos
+        return dataclasses.replace(rdata, data=data, geoinfos=geoinfos)
 
     def add_chunk(self, chunk: ModelOutput, batch: ModelBatch) -> None:
         """Index the predictions of one rollout chunk by the time they are valid for.

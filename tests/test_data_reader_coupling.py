@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 
 from weathergen.common.coupling import Coupler, Coupling, DataReaderCoupling
 from weathergen.datasets.batch import ModelBatch, SampleMetaData
-from weathergen.datasets.data_reader_base import DataReaderBase, TimeWindowHandler
+from weathergen.datasets.data_reader_base import DataReaderBase, ReaderData, TimeWindowHandler
 from weathergen.datasets.stream_data import StreamData
 from weathergen.datasets.tokenizer_utils import TIMES_WIDTH, VERTEX_WIDTH
 from weathergen.model.chunking import ChunkInfo
@@ -61,8 +61,21 @@ class FakeReader(DataReaderBase):
     def length(self) -> int:
         return 1000
 
-    def _get(self, idx, channels_idx):
-        raise AssertionError("DataReaderCoupling must not fall through to _get")
+    def _get(self, idx, channels_idx) -> ReaderData:
+        """Ground truth for one window, valued so its origin is identifiable.
+
+        Channel j carries `100 + j`, which is distinguishable from any prediction the chunk
+        fixture emits, so a primed window cannot be confused with a served one.
+        """
+        coords = np.stack(
+            [np.linspace(-80, 80, N_POINTS), np.linspace(-170, 170, N_POINTS)], axis=-1
+        ).astype(np.float32)
+        data = np.tile(
+            np.asarray([100.0 + c for c in channels_idx], dtype=np.float32), (N_POINTS, 1)
+        )
+        geoinfos = np.zeros((N_POINTS, len(self.geoinfo_idx)), dtype=np.float32)
+        times = np.array(["2023-01-01T00:00"] * N_POINTS, dtype="datetime64[ns]")
+        return ReaderData(coords=coords, geoinfos=geoinfos, data=data, datetimes=times)
 
 
 @pytest.fixture
@@ -149,9 +162,33 @@ def collect(reader: DataReaderCoupling, idx: int):
     return rdata
 
 
-def test_reads_empty_before_any_chunk_arrives(consumer):
-    """The first rollout step happens before the producer has run: spoof, do not fail."""
-    rdata = DataReaderCoupling(consumer, STREAM).get_source(np.int64(SAMPLE_IDX))
+def test_primes_from_the_producer_before_any_chunk_arrives(consumer, time_window_handler):
+    """C2: the first rollout step precedes the producer's first chunk, so serve ground truth.
+
+    From the *producer's* target data, not the consumer's source data: a primed window has to be
+    the same quantity a prediction is, on the same grid and through the same channel map.
+    """
+    producer = _producer_with_wider_target(time_window_handler)
+
+    reader = DataReaderCoupling(consumer, STREAM, producer=producer)
+    rdata = reader.get_source(np.int64(SAMPLE_IDX))
+
+    assert not rdata.is_empty(), "priming must not hand back a spoof"
+    assert rdata.data.shape == (N_POINTS, len(consumer.source_idx))
+    # the producer's targets are [10u, sea_ice, 2d, sst, msl]; the consumer sources [sst, sea_ice],
+    # which are columns 3 and 1, carrying 103 and 101
+    assert np.allclose(rdata.data[:, 0], 103.0)
+    assert np.allclose(rdata.data[:, 1], 101.0)
+
+
+def test_reads_empty_once_a_chunk_has_been_dispatched(consumer, chunk, time_window_handler):
+    """Past the first chunk an unproduced window is a real gap, so it reads back empty."""
+    # the producer matches the chunk fixture's two predicted channels
+    producer = FakeReader(time_window_handler)
+    reader = DataReaderCoupling(consumer, STREAM, producer=producer)
+    reader.add_chunk(*chunk)
+
+    rdata = reader.get_source(np.int64(SAMPLE_IDX + FSTEPS[-1] + 5))
 
     assert rdata.is_empty()
     assert rdata.data.shape == (0, len(consumer.source_idx))
