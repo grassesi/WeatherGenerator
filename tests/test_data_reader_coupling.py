@@ -347,6 +347,16 @@ def test_named_channels_survive_the_round_trip(consumer, coords, time_window_han
     assert np.allclose(rdata.data[:, 1], 10.0)
 
 
+def test_a_non_periodic_reader_is_refused(consumer, time_window_handler):
+    """Coupled streams are gridded and periodic; the assumption is asserted, not assumed."""
+
+    producer = FakeReader(time_window_handler)
+    producer.period = None  # as an obs reader arrives: no sampling period at all
+
+    with pytest.raises(ValueError, match="not periodic"):
+        DataReaderCoupling(consumer, STREAM, producer=producer)
+
+
 def test_missing_producer_channel_is_reported(consumer, time_window_handler):
     producer = FakeReader(time_window_handler)
     producer.target_channels = ["sst"]

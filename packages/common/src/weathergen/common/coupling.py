@@ -386,15 +386,8 @@ class Coupler:
         explicit (coupling_reader_placement.md P6).
         """
 
-        produced = getattr(coupled, "period", None)
-        consumed = getattr(base, "period", None)
-        if produced is None or consumed is None:
-            msg = (
-                f"Coupled stream {stream!r} cannot be levelled: "
-                f"producer period={produced}, consumer period={consumed}. Both sides must be "
-                "periodic for the cadences to be comparable."
-            )
-            raise ValueError(msg)
+        # both periods exist: DataReaderCoupling asserts that at construction, which runs first
+        produced, consumed = coupled.period, base.period
 
         if produced == consumed:
             logger.info(
@@ -975,6 +968,20 @@ class DataReaderCoupling(DataReaderTimestep):
         self._max_pending = int(max_pending_windows)
         self._length = dataset.length()
 
+        # A coupled stream is gridded and periodic on both sides. That is an assumption, not
+        # something the type system enforces -- `DataReaderObs` has no period at all -- so it is
+        # asserted here, where the message can name the stream, rather than surfacing later as a
+        # missing attribute inside a wrapper.
+        for role, reader in (("consumer", dataset), ("producer", producer)):
+            if reader is not None and getattr(reader, "period", None) is None:
+                msg = (
+                    f"Coupled stream {producer_stream!r}: its {role} reader "
+                    f"{type(reader).__name__} is not periodic. Coupling compares the two sides' "
+                    "sampling periods to level their cadences, so both must be gridded readers "
+                    "with a period."
+                )
+                raise ValueError(msg)
+
         # The reader stands on the PRODUCER's grid: its windows are the producer's windows and
         # its period the producer's sampling period. Everything below the levelling wrapper is
         # therefore on one grid -- predictions and primed ground truth alike -- and that wrapper
@@ -983,9 +990,9 @@ class DataReaderCoupling(DataReaderTimestep):
             super().__init__(
                 producer.time_window_handler,
                 dataset.stream_info,
-                getattr(producer, "data_start_time", None),
-                getattr(producer, "data_end_time", None),
-                getattr(producer, "period", None),
+                producer.data_start_time,
+                producer.data_end_time,
+                producer.period,
             )
 
         # consumer side: how ForcingInput will tokenize and normalize what we return
