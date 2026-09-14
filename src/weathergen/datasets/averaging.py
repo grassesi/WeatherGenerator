@@ -3,12 +3,17 @@ import typing
 import numpy as np
 import pandas as pd
 
-from weathergen.datasets.data_reader_base import DataReaderTimestep, ReaderData, TIndex
+from weathergen.datasets.data_reader_base import (
+    DataReaderTimestep,
+    ReaderData,
+    TIndex,
+    WrappedDataReader,
+)
 
 AVERAGING_GEOINFOS = ["z", "insolation"]
 
 
-class AveragingReader(DataReaderTimestep):
+class AveragingReader(DataReaderTimestep, WrappedDataReader):
     def __init__(self, wrapped_reader: DataReaderTimestep):
         self._wrapped_reader = wrapped_reader
 

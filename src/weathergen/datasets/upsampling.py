@@ -39,6 +39,7 @@ from weathergen.datasets.data_reader_base import (
     DType,
     ReaderData,
     TIndex,
+    WrappedDataReader,
 )
 from weathergen.datasets.geoinfo import computed_columns, recompute_geoinfos
 
@@ -47,7 +48,7 @@ _logger = logging.getLogger(__name__)
 _ZERO = np.timedelta64(0, "s")
 
 
-class UpsamplingReader(DataReaderTimestep):
+class UpsamplingReader(DataReaderTimestep, WrappedDataReader):
     """
     Wraps a fixed-period reader and serves every window from the source sample covering it.
 

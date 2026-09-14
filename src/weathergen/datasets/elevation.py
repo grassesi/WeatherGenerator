@@ -30,6 +30,7 @@ from weathergen.datasets.data_reader_base import (
     NPTDel64,
     ReaderData,
     TIndex,
+    WrappedDataReader,
 )
 
 _logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ def parse_elevations(
     return schedule
 
 
-class ElevatingReader(DataReaderBase):
+class ElevatingReader(DataReaderBase, WrappedDataReader):
     """
     Wraps a data reader and adds a configured constant to selected channels.
 

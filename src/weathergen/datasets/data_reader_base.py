@@ -7,9 +7,12 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import copy
 import logging
 from abc import abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import Self
 
 import numpy as np
 from numpy import datetime64, timedelta64
@@ -302,6 +305,51 @@ def check_reader_data(rdata: ReaderData, dtr: DTRange) -> None:
     assert np.logical_and(rdata.datetimes >= dtr.start, rdata.datetimes < dtr.end).all(), (
         f"datetimes for data points violate window {dtr}."
     )
+
+
+class WrappedDataReader:
+    """A reader that decorates exactly one other reader, stored as `_wrapped_reader`.
+
+    Every wrapper in the reader family already holds its inner reader under that name. Declaring
+    it here makes the convention a contract, which is what lets a stack be rebuilt on a different
+    innermost reader without knowing which wrappers it happens to contain.
+    """
+
+    _wrapped_reader: "DataReaderBase"
+
+    def rebased(self, make_inner: Callable[["DataReaderBase"], "DataReaderBase"]) -> Self:
+        """Return a copy of this stack whose innermost reader is replaced by `make_inner(it)`.
+
+        The original stack is left untouched. That matters because a stream's readers are shared
+        with the sampler -- the same objects serve the stream's own source and target -- so
+        mutating one in place to redirect a forcing would silently change what the batch reads.
+
+        Shallow copies, not reconstructed wrappers: a wrapper's constructor arguments are not
+        recoverable from the instance (`ElevatingReader` keeps only the parsed schedules), while
+        `copy.copy` preserves every derived attribute. That is correct exactly as long as the
+        replacement presents the same metadata as the reader it replaces, which its own
+        construction is expected to assert.
+        """
+
+        inner = self._wrapped_reader
+        new_inner = (
+            inner.rebased(make_inner)
+            if isinstance(inner, WrappedDataReader)
+            else make_inner(inner)
+        )
+        clone = copy.copy(self)
+        clone._wrapped_reader = new_inner
+        return clone
+
+
+def rebase_innermost(
+    reader: "DataReaderBase", make_inner: Callable[["DataReaderBase"], "DataReaderBase"]
+) -> "DataReaderBase":
+    """`reader.rebased(...)` for a wrapper stack, `make_inner(reader)` for a bare reader."""
+
+    if isinstance(reader, WrappedDataReader):
+        return reader.rebased(make_inner)
+    return make_inner(reader)
 
 
 class DataReaderBase(metaclass=ABCMeta):
