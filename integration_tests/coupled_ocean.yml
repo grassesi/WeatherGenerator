@@ -1,0 +1,25 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# The slow half: a 24 h window stepping 24 h, as the ocean runs.
+#
+# This asymmetry is the point of the pair. It makes the two coupling directions need different
+# levelling, which is what the deployed configuration does and what a same-cadence pair cannot
+# exercise:
+#   Atmo -> Ocean   producer 6 h, consumer reads ATMO at 6 h  -> no levelling; the ocean's own
+#                   average_window collapses the four samples in its window, exactly as in training
+#   Ocean -> Atmo   producer 24 h, consumer reads OCEAN at 6 h -> upsampling
+ffe_num_blocks: 2
+streams_directory: "./integration_tests/streams_coupled_ocean/"
+
+training_config:
+  time_window_step: 24:00:00
+  time_window_len: 24:00:00
+  forecast:
+    time_step: 24:00:00

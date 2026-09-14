@@ -1,0 +1,41 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# The atmosphere's stream, read 6-hourly into a 24 h window: four samples averaged to one. The coupling needs no levelling; this wrapper does the reduction, as in training.
+ATMO :
+  type : anemoi
+  stream_id: 1
+  filenames : ['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v8.zarr']
+  loss_weight : 1.
+  source : ["t_850"]
+  target : []
+  diagnostic : False
+  masking_rate : 0.0
+  frequency : 06:00:00
+  average_window : True
+  is_dynamic_forcing : true
+  masking_rate_none : 0.05
+  token_size : 32
+  tokenize_spacetime : True
+  max_num_targets: -1
+  embed :
+    net : transformer
+    num_tokens : 1
+    num_heads : 2
+    dim_embed : 16
+    num_blocks : 2
+  embed_target_coords :
+    net : linear
+    dim_embed : 16
+  target_readout :
+    num_layers : 2
+    num_heads : 2
+  pred_head :
+    ens_size : 1
+    num_layers : 1

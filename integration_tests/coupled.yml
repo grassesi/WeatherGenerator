@@ -1,0 +1,36 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Two-sided coupling: each component predicts one stream and is forced by the other's.
+#
+# Both directions take effect only because each component reads its partner's stream with
+# is_dynamic_forcing: true (see streams_coupled_*/). A consumer that does not is a silent
+# no-op, which is what the "N actually exchanging" line exists to make visible.
+rollout:
+  start_date: 2022-01-01T00:00
+  end_date: 2022-02-01T00:00
+  # a multiple of the slower component's 24 h window, so each chunk is 4 atmospheric steps
+  # against 1 oceanic one -- the ratio the deployed pair runs at
+  chunk_length: '24:00:00'
+  num_chunks: 2
+  num_samples: 1
+  forecast_offset: 1
+  num_workers: 0
+  accumulate_chunks: false
+
+couplings:
+  atmo_forces_ocean:
+    producer: Atmo
+    consumer: Ocean
+    stream: ATMO
+
+  ocean_forces_atmo:
+    producer: Ocean
+    consumer: Atmo
+    stream: OCEAN

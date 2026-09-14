@@ -1,0 +1,16 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# The fast half of the coupled pair: a 6 h window stepping 6 h, as the atmosphere runs.
+#
+# ffe_num_blocks is what makes the forcing engine real: ForcedModel reads
+# cf.get("ffe_num_blocks", 0) and with zero blocks ForcingEngine.forward returns its input
+# unchanged, so a component would look forcing-capable and silently not be.
+ffe_num_blocks: 2
+streams_directory: "./integration_tests/streams_coupled_atmo/"
