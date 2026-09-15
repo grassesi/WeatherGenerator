@@ -25,7 +25,13 @@ OCEAN :
   # at one lag and the same lag must hold through finetuning and inference. The couplings file
   # must not set it. Absent, or the alias 'step', means forecast.offset * time_window_step,
   # which is what the code did before the key existed.
-  # forcing_lag : '06:00:00'
+  #
+  # DLESyM (Cresswell-Clay et al. 2025): the atmosphere is forced by a *stale* ocean, which is
+  # the asymmetry the scheme turns on. 6 h is both the default and the smallest legal value
+  # (`len_c - P + chunk_length` = 6 h - 24 h + 24 h), the ocean being stepped after the
+  # atmosphere. Stated explicitly rather than left to the default so the scheme is legible in
+  # the checkpoint. See `forcing_lag_design.md` B and D4.
+  forcing_lag : '06:00:00'
   masking_rate_none : 0.05
   token_size : 32
   tokenize_spacetime : True
