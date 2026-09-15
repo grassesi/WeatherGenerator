@@ -239,13 +239,15 @@ class UpsamplingReader(DataReaderTimestep, WrappedDataReader):
 
         # the wrapped reader may hand out its stored arrays; never mutate them in place
         coords = rdata.coords.copy()
-        geoinfos = rdata.geoinfos.copy()
         datetimes = (rdata.datetimes + np.asarray(shift)).copy()
 
         # the served values keep their own time only in the sense that they are the last known
         # state of the field; the geoinfos describe the window being served, so they follow the
-        # new stamps rather than the old ones
-        recompute_geoinfos(geoinfos, coords, datetimes, self._computed_geoinfos)
+        # new stamps rather than the old ones. recompute_geoinfos is pure and returns a fresh
+        # array, which is the copy this function would otherwise have to make itself.
+        geoinfos = recompute_geoinfos(
+            rdata.geoinfos, coords, datetimes, self.geoinfo_channels
+        )
 
         return ReaderData(
             coords=coords,
