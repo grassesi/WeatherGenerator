@@ -18,6 +18,7 @@ import torch
 from numpy.typing import NDArray
 
 from weathergen.common.coupling import Coupler, Coupling
+from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.batch import ModelBatch, SampleMetaData
 from weathergen.datasets.coupling_reader import DataReaderCoupling, ForcingProvenance
 from weathergen.datasets.data_reader_base import (
@@ -1023,3 +1024,72 @@ def test_a_single_pass_interleave_costs_one_chunk_of_round_trip_lag():
     assert ocean_min + atmo_min == SCHEME_CHUNK
     assert np.timedelta64(18, "h") + H6 == SCHEME_CHUNK, "DLESyM is exactly on the bound"
     assert np.timedelta64(12, "h") + np.timedelta64(3, "h") < SCHEME_CHUNK, "SamudrACE is inside"
+
+
+def test_the_reduced_forcing_is_stamped_at_the_window_start():
+    """What the ocean's model actually receives: one row, and the time it claims to be from.
+
+    The consumer's own `AveragingReader` sits above the coupling reader and collapses the
+    gathered windows to one datapoint stamped at the window *start*
+    (`averaging.py`, `datetimes.min()`). That stamp is what `encode_times_source` turns into
+    the token's time features and what the cyclic geoinfos are recomputed at, so it is a
+    separate fact from which windows were gathered -- and it moved when the averaging
+    semantics were levelled with an un-averaged stream's.
+
+    The distinction matters for reading the lag: at 18 h the *content* reaches `A(T)` while
+    the *label* is `T - 18h`. A forcing labelled `T`, concurrent with the ocean's own target
+    window, would need lag 0, which does not resolve.
+    """
+
+    consumer_handler = handler(SCHEME_INIT, H24)
+    producer_handler = handler(SCHEME_INIT, H6)
+    target = SCHEME_INIT + 4 * H24
+
+    for lag, expected_stamp in ((np.timedelta64(18, "h"), target - np.timedelta64(18, "h")),
+                                (H24, target - H24)):
+        coupled = DataReaderCoupling(
+            StampedReader(consumer_handler),
+            STREAM,
+            producer=StampedReader(producer_handler),
+            request_handler=shifted(consumer_handler, lag),
+            # far ahead, so every gathered window is primed from the producer's own truth
+            init_time=np.datetime64("2030-01-01T00:00"),
+        )
+        averaged = AveragingReader(coupled)
+        idx = idx_of(consumer_handler, target)
+
+        gathered = served_times(coupled.get_source(idx))
+        reduced = averaged.get_source(idx)
+
+        assert len(gathered) == 4, "four 6 h emissions inside a 24 h request"
+        assert served_times(reduced) == [expected_stamp], (
+            "the reduction is stamped at the start of the window it averaged"
+        )
+        assert min(gathered) == expected_stamp, "which is the earliest window it gathered"
+
+
+def test_only_the_dlesym_lag_gathers_the_atmosphere_at_the_target_time():
+    """The content claim, stated where the averaging cannot hide it.
+
+    Averaging collapses the four gathered windows into one row, so the stamp alone can no
+    longer say whether `A(T)` was in the mean. This asserts it on the gathered windows, which
+    is where the lag actually decides it.
+    """
+
+    consumer_handler = handler(SCHEME_INIT, H24)
+    producer_handler = handler(SCHEME_INIT, H6)
+    target = SCHEME_INIT + 4 * H24
+
+    reach = {}
+    for hours in (18, 24):
+        coupled = DataReaderCoupling(
+            StampedReader(consumer_handler),
+            STREAM,
+            producer=StampedReader(producer_handler),
+            request_handler=shifted(consumer_handler, np.timedelta64(hours, "h")),
+            init_time=np.datetime64("2030-01-01T00:00"),
+        )
+        reach[hours] = max(served_times(coupled.get_source(idx_of(consumer_handler, target))))
+
+    assert reach[18] == target, "18 h reaches the atmosphere at the ocean's own target time"
+    assert reach[24] == target - H6, "24 h stops one atmospheric step short of it"

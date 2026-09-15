@@ -9,8 +9,7 @@ from weathergen.datasets.data_reader_base import (
     TIndex,
     WrappedDataReader,
 )
-
-AVERAGING_GEOINFOS = ["z", "insolation"]
+from weathergen.datasets.geoinfo import recompute_geoinfos
 
 
 class AveragingReader(DataReaderTimestep, WrappedDataReader):
@@ -38,21 +37,6 @@ class AveragingReader(DataReaderTimestep, WrappedDataReader):
         self.mean_geoinfo = self._wrapped_reader.mean_geoinfo
         self.stdev_geoinfo = self._wrapped_reader.stdev_geoinfo
 
-        # only average selected geoinfo channels
-        self.averaging_geoinfo_idx = [
-            idx
-            for idx, channel in enumerate(self.geoinfo_channels)
-            if channel in AVERAGING_GEOINFOS
-        ]
-        self.averaging_geoinfos = [
-            channel for channel in self.geoinfo_channels if channel in AVERAGING_GEOINFOS
-        ]  # construct unique column labels
-        self.non_averaging_geoinfo_idx = [
-            idx
-            for idx, _ in enumerate(self.geoinfo_channels)
-            if idx not in self.averaging_geoinfo_idx
-        ]
-
     @typing.override
     def length(self) -> int:
         return self._wrapped_reader.length()
@@ -66,49 +50,37 @@ class AveragingReader(DataReaderTimestep, WrappedDataReader):
         """
         Calculate Averages if multiple datapoints per gridpoint exist.
 
-        Averages are calculated on all source/target channels and on selected
-        geoinfo channels (eg. insolation, z). Static features and time features
-        are taken from last datapoint in the interval. The new data thus has the
-        following semantics: data in interval (<start>, <end>) => data averaged over the last
-        <interval len> hours at time <end>.
+        Averages are calculated on all source/target channels; the geoinfos follow
+        `recompute_geoinfos`, which owns that policy.
+
+        Semantics: a window [start, end) averages every datapoint the wrapped reader
+        returns for it -- which is exactly the grid times in [start, end) -- and serves the
+        result as one datapoint stamped at `start`. This is the same contract an un-averaged
+        stream on the same grid honours.
         """
         rdata = self._wrapped_reader._get(idx, channels_idx)
-        if rdata.is_empty():
-            # An empty window has nothing to average, and `datetimes.max()` on a zero-size array
-            # raises. Reading empty is a normal state, not a defect: a window past the end of the
-            # data, or -- for a coupled stream, where this reader sits above the coupling reader
-            # -- a window the producer has not emitted.
+        if rdata.is_empty():  # Reading empty is a normal state, not a defect.
             return rdata
-        max_time_idx = np.argwhere(rdata.datetimes == rdata.datetimes.max())
+
+        stamp = rdata.datetimes.min()
+        rows = rdata.datetimes == stamp
 
         data = (
             pd.DataFrame(
-                np.concat(
-                    [rdata.coords, rdata.geoinfos[:, self.averaging_geoinfo_idx], rdata.data],
-                    axis=1,
-                ),
-                columns=["lat", "lon", *self.averaging_geoinfos, *channels_idx],
-                # groupby() implicitly sorts, unaligning data and coordinates: the coords,
-                # geoinfos and datetimes below are taken unsorted via max_time_idx.
+                np.concat([rdata.coords, rdata.data], axis=1),
+                columns=["lat", "lon", *channels_idx],
+                # groupby() implicitly sorts, unaligning data and coordinates.
             )
             .groupby(["lat", "lon"], sort=False)
             .mean()
         )
 
-        # Scatter both halves back to the positions geoinfo_channels declares. Everything
-        # downstream indexes geoinfos by position and not by name
-        geoinfos = np.empty(
-            (len(max_time_idx), len(self.geoinfo_channels)), dtype=rdata.geoinfos.dtype
-        )
-        geoinfos[:, self.averaging_geoinfo_idx] = data[self.averaging_geoinfos].values
-        geoinfos[:, self.non_averaging_geoinfo_idx] = rdata.geoinfos[
-            max_time_idx, self.non_averaging_geoinfo_idx
-        ]
-
         return ReaderData(
-            coords=rdata.coords[max_time_idx, :].squeeze(),
-            geoinfos=geoinfos,
+            coords=rdata.coords[rows],
+            geoinfos=recompute_geoinfos(
+                rdata.geoinfos, rdata.coords, rdata.datetimes, self.geoinfo_channels, stamp
+            ),
             data=data[channels_idx].values,
-            datetimes=rdata.datetimes[max_time_idx].squeeze(),
+            datetimes=rdata.datetimes[rows],
             is_spoof=rdata.is_spoof,
         )

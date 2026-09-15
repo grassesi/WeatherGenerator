@@ -281,15 +281,17 @@ def shifted(handler: TimeWindowHandler, lag: NPTDel64) -> TimeWindowHandler:
     )
 
 
-def restamp(
-    rdata: ReaderData, shift: NPTDel64, computed_geoinfos: dict[int, object]
-) -> ReaderData:
+def restamp(rdata: ReaderData, shift: NPTDel64, geoinfo_channels: list[str]) -> ReaderData:
     """Move a window's timestamps by `shift`, recomputing the time-varying geoinfos.
 
     Shifts rather than overwrites, so structure inside the window -- several observation
-    times, say -- survives the move. The geoinfos describe the window being served, so
-    insolation and the cyclic time terms follow the new stamps; everything else (z, lsm,
-    slor, sdor) is constant in time and is carried as it comes.
+    times, say -- survives the move. The geoinfos describe the window being served, so they
+    follow the new stamps rather than the old ones: `recompute_geoinfos` owns that policy
+    per channel (static carried, phase re-evaluated, insolation a window mean), which is why
+    this takes channel names rather than a precomputed column map.
+
+    Called with `stamp` left None, because restamping moves every row and keeps them all --
+    it never collapses a window onto one datetime, which is the averaging case.
 
     Shared by `UpsamplingReader`, which holds a coarse source across finer windows, and by
     the coupling reader, which does the same for a forcing whose producer is coarser than
@@ -298,10 +300,10 @@ def restamp(
 
     # the source may hand out its stored arrays; never mutate them in place
     coords = rdata.coords.copy()
-    geoinfos = rdata.geoinfos.copy()
     datetimes = (rdata.datetimes + np.asarray(shift)).copy()
 
-    recompute_geoinfos(geoinfos, coords, datetimes, computed_geoinfos)
+    # pure, and returns a fresh array -- the copy this function would otherwise make itself
+    geoinfos = recompute_geoinfos(rdata.geoinfos, coords, datetimes, geoinfo_channels)
 
     return ReaderData(
         coords=coords,
