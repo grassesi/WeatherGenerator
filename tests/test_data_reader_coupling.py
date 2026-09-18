@@ -366,27 +366,64 @@ def test_an_unforced_stream_reads_the_same_window_through_the_same_arithmetic(la
     assert np.allclose(from_disk.data, primed.data)
 
 
-def test_a_fractional_lag_quantises_backwards(consumer, consumer_handler):
-    """A lag finer than the source step resolves to the window covering it, never past it.
-
-    Rounding forward would let a 3 h lag on a 6 h grid serve the window the consumer is
-    predicting -- no lag at all, and the partner's state at the very time being forecast.
-    `Coupler` warns about the quantisation at setup so it is visible rather than silent.
+class SampledReader(StampedReader):
+    """A stream sampled every `period` inside a longer window, as a real 6 h ERA5 read into a
+    24 h ocean window is: the window returns one row per sample it contains, not one per window.
     """
 
-    reader = DataReaderCoupling(
-        consumer,
-        STREAM,
-        request_handler=shifted(consumer_handler, np.timedelta64(3, "h")),
-        is_forced=False,
-    )
-    predicts = np.datetime64("2023-01-03T00:00")
-    rdata = reader.get_source(idx_of(consumer_handler, predicts))
+    def __init__(self, twh: TimeWindowHandler, period: np.timedelta64) -> None:
+        super().__init__(twh)
+        self.period = period
 
-    assert served_origins(rdata) == [predicts - H6], "the covering window, not the next one"
-    # restamped onto the request, so the tokenizer still sees it inside the window it asked for
-    assert served_times(rdata) == [np.datetime64(predicts - np.timedelta64(3, "h"), "m")]
-    assert reader.provenance.held == 1
+    def _get(self, idx, channels_idx) -> ReaderData:
+        didx, _ = self._get_dataset_idxs(idx)
+        times = np.repeat(self.data_start_time + didx * self.period, N_POINTS)
+        one = super()._get(idx, channels_idx)  # coords and geoinfos of one sample
+        return ReaderData(
+            coords=np.tile(one.coords, (len(didx), 1)),
+            geoinfos=np.tile(one.geoinfos, (len(didx), 1)),
+            data=np.array([[value_of(t, c) for c in channels_idx] for t in times], np.float32),
+            datetimes=times.astype("datetime64[ns]"),
+        )
+
+
+@pytest.mark.parametrize("lag_hours", [0, 6, 18, 24])
+def test_training_and_inference_read_the_same_samples_off_the_window_grid(lag_hours):
+    """L7 at the DLESyM geometry: a 24 h ocean window over a 6 h atmosphere, lagged 18 h.
+
+    18 h is a multiple of the atmosphere's 6 h sampling period but not of the ocean's 24 h
+    window step. Unforced, the rows are read on the stream's sampling grid, so training gathers
+    exactly the samples a coupled run gathers from its producer. Resolving it on the window
+    grid instead trained on the atmosphere up to T - 6 h while inference served it up to T --
+    losing the one sample, A(T), that DLESyM exists to use.
+    """
+
+    ocean = handler(CONSUMER_START, H24)
+    lag = np.timedelta64(lag_hours, "h")
+    predicts = np.datetime64("2023-01-06T00:00")
+    idx = idx_of(ocean, predicts)
+
+    training = DataReaderCoupling(
+        SampledReader(ocean, H6), STREAM, request_handler=shifted(ocean, lag), is_forced=False
+    )
+    inference = DataReaderCoupling(
+        SampledReader(ocean, H6),
+        STREAM,
+        producer=StampedReader(handler(PRODUCER_START, H6)),
+        request_handler=shifted(ocean, lag),
+        init_time=np.datetime64("2024-01-01T00:00"),  # every window primed from ground truth
+    )
+
+    trained, served = training.get_source(idx), inference.get_source(idx)
+    start = predicts - lag
+    expected = [np.datetime64(start + k * H6, "m") for k in range(4)]
+
+    assert served_origins(trained) == expected, "training reads the samples inside the window"
+    assert served_origins(served) == expected, "inference gathers the same samples"
+    assert np.array_equal(trained.data, served.data)
+    assert served_times(trained) == served_times(served)
+    if lag_hours == 18:
+        assert expected[-1] == predicts, "DLESyM: the last sample is the atmosphere at T"
 
 
 def test_an_overlapping_producer_grid_is_refused(consumer, consumer_handler):

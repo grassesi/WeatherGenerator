@@ -22,6 +22,7 @@ It lives here rather than beside the `Coupler` because the training path needs i
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import logging
 import typing
@@ -219,13 +220,25 @@ class DataReaderCoupling(DataReaderTimestep):
         self._source_handler = (
             producer.time_window_handler if producer is not None else dataset.time_window_handler
         )
-        # Gathering only exists to reconcile two grids. With no producer there is one grid, and
-        # the consumer's own disk reader is the authority on what a window holds -- it already
-        # returns every sample inside it. Gathering there would concatenate overlapping windows
-        # and, at a lag finer than the window step, reach the very window being predicted.
-        self._gathers = producer is not None
+        # Unforced, the rows are the consumer's own disk data, read on the stream's *sampling*
+        # grid -- one window per sample -- so a lagged request gathers exactly the samples a
+        # producer on that grid would emit (L7). Resolving it on the consumer's window grid
+        # instead quantises the lag to the window step: at the DLESyM lag of 18 h on a 24 h
+        # ocean window, training read the atmosphere up to T - 6 h while coupled inference
+        # serves it up to T.
+        self._disk = dataset
+        if not self._is_forced:
+            self._source_handler = TimeWindowHandler(
+                dataset.data_start_time,
+                dataset.data_end_time or dataset.time_window_handler.t_end,
+                dataset.period,
+                dataset.period,
+            )
+            self._disk = copy.copy(dataset)
+            self._disk.time_window_handler = self._source_handler
+        self._gathers = producer is not None or not self._is_forced
 
-        if self._gathers:
+        if producer is not None:
             source = producer.time_window_handler
             if source.t_window_len > source.t_window_step:
                 msg = (
@@ -488,7 +501,7 @@ class DataReaderCoupling(DataReaderTimestep):
 
         if not self._is_forced:
             self.provenance.disk += 1
-            return self._dataset._get(src, channels_idx)
+            return self._disk._get(src, channels_idx)
 
         start = self._source_handler.window(src).start
 
