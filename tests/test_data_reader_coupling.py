@@ -18,6 +18,7 @@ import torch
 from numpy.typing import NDArray
 
 from weathergen.common.coupling import Coupler, Coupling
+from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.batch import ModelBatch, SampleMetaData
 from weathergen.datasets.coupling_reader import DataReaderCoupling, ForcingProvenance
 from weathergen.datasets.data_reader_base import (
@@ -880,3 +881,215 @@ def test_step_is_a_documented_alias_for_the_default(consumer_handler):
     forcings = _forcings(consumer_handler, {"era5": [consumer]})
 
     assert forcings.lags["era5"] == np.timedelta64(consumer_handler.t_window_step, "ms")
+
+
+# --------------------------------------------------------------- the published coupling schemes
+
+# The deployed pairing, driven through the interleave the `Coupler` actually runs: a 6 h
+# atmosphere against a 24 h ocean in 24 h chunks, the atmosphere stepped first. Chunk `i` emits
+# the producer's global forecast steps `i*n+1 .. (i+1)*n`, so with `forecast_offset` 1 a chunk
+# ends on its boundary rather than starting there. After chunk `i` the atmosphere has therefore
+# reached exactly the ocean's own target time and no further, and that frontier -- not the
+# arithmetic of the window -- is what bounds how fresh a forcing can be.
+#
+# These cases are the empirical answer `forcing_lag_design.md` E asked for, as a test rather
+# than as prose: which published scheme a lag expresses is decided by the source windows the
+# request resolves to, and a scheme whose windows do not all exist is not available at all.
+
+SCHEME_CHUNK = H24
+SCHEME_INIT = np.datetime64("2023-01-02T00:00")
+
+
+def _replay(consumer_step, producer_step, lag, *, producer_first, num_chunks=2):
+    """Drive one direction of the exchange through the real dispatch order.
+
+    Returns one row per request: the time predicted, the source valid times served, and how
+    many of that request's source windows were unresolved.
+    """
+
+    c_h = handler(SCHEME_INIT, consumer_step)
+    p_h = handler(SCHEME_INIT, producer_step)
+    per_p = int(SCHEME_CHUNK // producer_step)
+    per_c = int(SCHEME_CHUNK // consumer_step)
+
+    reader = DataReaderCoupling(
+        StampedReader(c_h),
+        STREAM,
+        producer=StampedReader(p_h),
+        request_handler=shifted(c_h, lag),
+        init_time=SCHEME_INIT,
+    )
+
+    rows = []
+    for i in range(num_chunks):
+        fsteps = list(range(i * per_p + 1, (i + 1) * per_p + 1))
+
+        def dispatch(fsteps=fsteps, p_h=p_h):
+            reader.add_chunk(*build_chunk(p_h, SCHEME_INIT, _coords(), fsteps=fsteps))
+
+        if producer_first:
+            dispatch()
+
+        for k in range(per_c):
+            target = SCHEME_INIT + (i * per_c + k + 1) * consumer_step
+            before = reader.provenance.unresolved
+            rdata = reader.get_source(idx_of(c_h, target))
+            rows.append(
+                (
+                    target,
+                    [] if rdata.is_empty() else served_times(rdata),
+                    reader.provenance.unresolved - before,
+                )
+            )
+
+        if not producer_first:
+            dispatch()
+
+    return rows
+
+
+@pytest.mark.parametrize(
+    ("lag_hours", "unresolved_per_request"),
+    [
+        (0, 3),  # the fully concurrent window DLESyM names as an instant
+        (6, 2),
+        (12, 1),  # SamudrACE's half of the ocean's own step
+        (18, 0),  # DLESyM, as fresh as a single pass admits
+        (24, 0),  # the old default
+    ],
+)
+def test_how_fresh_an_atmosphere_the_ocean_can_reach(lag_hours, unresolved_per_request):
+    """Below 18 h the ocean reaches windows the atmosphere has not emitted yet.
+
+    Each request spans four 6 h emissions, and every hour of lag below the bound costs one of
+    them. They do not fail loudly: an unresolved window reads back empty and the forcing falls
+    through to a climatological spoof, which is why this counts rather than merely running.
+    """
+
+    rows = _replay(H24, H6, np.timedelta64(lag_hours, "h"), producer_first=True)
+
+    assert [unresolved for _, _, unresolved in rows] == [unresolved_per_request] * len(rows)
+
+
+def test_dlesym_reaches_the_atmosphere_at_its_own_target_time():
+    """What separates DLESyM's fresh atmosphere from the lag that preceded it.
+
+    Both resolve completely, so no count distinguishes them; the newest source window each
+    gathers does. At 18 h the request runs to `T + 6h`, so it takes in the atmospheric window
+    starting at `T` -- the `A(T)` of the scheme's own notation. At 24 h it stops at `T`, and
+    the newest it can take is one atmospheric step earlier.
+    """
+
+    fresh = _replay(H24, H6, np.timedelta64(18, "h"), producer_first=True)
+    stale = _replay(H24, H6, H24, producer_first=True)
+
+    for (target, fresh_times, _), (_, stale_times, _) in zip(fresh, stale, strict=True):
+        assert max(fresh_times) == target, "DLESyM: the atmosphere at the ocean's own time"
+        assert max(stale_times) == target - H6, "the old default: strictly before it"
+
+
+@pytest.mark.parametrize(
+    ("lag_hours", "unresolved"),
+    [
+        (3, 2),  # SamudrACE's half of the atmosphere's own step
+        (6, 0),  # DLESyM's stale ocean, and the default
+        (12, 0),
+    ],
+)
+def test_the_atmospheres_ocean_forcing_cannot_be_half_a_step(lag_hours, unresolved):
+    """The other half of why SamudrACE is not a lag this rollout can be configured into.
+
+    The ocean is stepped after the atmosphere, so within a chunk the atmosphere sees only the
+    ocean's previous one. At 3 h the last of each chunk's four requests reaches into the ocean
+    window being computed beside it and resolves to nothing.
+    """
+
+    rows = _replay(H6, H24, np.timedelta64(lag_hours, "h"), producer_first=False)
+
+    assert sum(row[2] for row in rows) == unresolved
+
+
+def test_a_single_pass_interleave_costs_one_chunk_of_round_trip_lag():
+    """Why no configuration expresses SamudrACE, stated as the invariant behind both halves.
+
+    Each direction's smallest legal lag is `len_c - P + D`, and summed over the two directions
+    the cadences cancel and one `chunk_length` of slack remains. DLESyM sits exactly on that
+    bound; SamudrACE's 12 h and 3 h sum to less than it, so no pair of lags can express it
+    without a second pass over each chunk to supply the half-step state.
+    """
+
+    ocean_min = H24 - H6 + ZERO  # atmosphere stepped first
+    atmo_min = H6 - H24 + SCHEME_CHUNK  # ocean stepped second
+
+    assert ocean_min + atmo_min == SCHEME_CHUNK
+    assert np.timedelta64(18, "h") + H6 == SCHEME_CHUNK, "DLESyM is exactly on the bound"
+    assert np.timedelta64(12, "h") + np.timedelta64(3, "h") < SCHEME_CHUNK, "SamudrACE is inside"
+
+
+def test_the_reduced_forcing_is_stamped_at_the_window_start():
+    """What the ocean's model actually receives: one row, and the time it claims to be from.
+
+    The consumer's own `AveragingReader` sits above the coupling reader and collapses the
+    gathered windows to one datapoint stamped at the window *start*
+    (`averaging.py`, `datetimes.min()`). That stamp is what `encode_times_source` turns into
+    the token's time features and what the cyclic geoinfos are recomputed at, so it is a
+    separate fact from which windows were gathered -- and it moved when the averaging
+    semantics were levelled with an un-averaged stream's.
+
+    The distinction matters for reading the lag: at 18 h the *content* reaches `A(T)` while
+    the *label* is `T - 18h`. A forcing labelled `T`, concurrent with the ocean's own target
+    window, would need lag 0, which does not resolve.
+    """
+
+    consumer_handler = handler(SCHEME_INIT, H24)
+    producer_handler = handler(SCHEME_INIT, H6)
+    target = SCHEME_INIT + 4 * H24
+
+    for lag, expected_stamp in ((np.timedelta64(18, "h"), target - np.timedelta64(18, "h")),
+                                (H24, target - H24)):
+        coupled = DataReaderCoupling(
+            StampedReader(consumer_handler),
+            STREAM,
+            producer=StampedReader(producer_handler),
+            request_handler=shifted(consumer_handler, lag),
+            # far ahead, so every gathered window is primed from the producer's own truth
+            init_time=np.datetime64("2030-01-01T00:00"),
+        )
+        averaged = AveragingReader(coupled)
+        idx = idx_of(consumer_handler, target)
+
+        gathered = served_times(coupled.get_source(idx))
+        reduced = averaged.get_source(idx)
+
+        assert len(gathered) == 4, "four 6 h emissions inside a 24 h request"
+        assert served_times(reduced) == [expected_stamp], (
+            "the reduction is stamped at the start of the window it averaged"
+        )
+        assert min(gathered) == expected_stamp, "which is the earliest window it gathered"
+
+
+def test_only_the_dlesym_lag_gathers_the_atmosphere_at_the_target_time():
+    """The content claim, stated where the averaging cannot hide it.
+
+    Averaging collapses the four gathered windows into one row, so the stamp alone can no
+    longer say whether `A(T)` was in the mean. This asserts it on the gathered windows, which
+    is where the lag actually decides it.
+    """
+
+    consumer_handler = handler(SCHEME_INIT, H24)
+    producer_handler = handler(SCHEME_INIT, H6)
+    target = SCHEME_INIT + 4 * H24
+
+    reach = {}
+    for hours in (18, 24):
+        coupled = DataReaderCoupling(
+            StampedReader(consumer_handler),
+            STREAM,
+            producer=StampedReader(producer_handler),
+            request_handler=shifted(consumer_handler, np.timedelta64(hours, "h")),
+            init_time=np.datetime64("2030-01-01T00:00"),
+        )
+        reach[hours] = max(served_times(coupled.get_source(idx_of(consumer_handler, target))))
+
+    assert reach[18] == target, "18 h reaches the atmosphere at the ocean's own target time"
+    assert reach[24] == target - H6, "24 h stops one atmospheric step short of it"

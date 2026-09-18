@@ -129,20 +129,24 @@ def test_the_summary_agrees_with_the_substitutions(coupled_run):
 
 
 # Where each component's forcing windows must come from, derived by hand from `coupled.yml`:
-# one sample, two 24 h chunks, an atmosphere at 6 h against an ocean at 24 h, both at the
-# default lag of one of the consumer's own windows.
+# one sample, two 24 h chunks, an atmosphere at 6 h against an ocean at 24 h, at the DLESyM
+# lags the two stream configs declare -- 18 h for the ocean's atmospheric forcing, 6 h for the
+# atmosphere's oceanic one.
 #
-# Ocean consumes ATMO. Its chunk is one 24 h step, so it makes two requests, each on a 24 h
-# window lagged 24 h: [t0, t0+24h) and [t0+24h, t0+48h). Four 6 h atmospheric windows start
-# inside each, so eight source windows in all. The one at t0 is the initialization window and
-# is primed from the atmosphere's own data; the other seven are predictions.
+# Ocean consumes ATMO at a lag of 18 h. Its chunk is one 24 h step, so it makes two requests,
+# each on a 24 h window: [t0+6h, t0+30h) and [t0+30h, t0+54h). Four 6 h atmospheric windows
+# start inside each, so eight source windows in all, and every one of them is a prediction.
+# Nothing is primed, which is the signature of the DLESyM lag as against the old 24 h one:
+# the window no longer reaches back to t0, the initialization window, but forward past its own
+# target's start to gather the atmosphere at T itself.
 #
 # Atmo consumes OCEAN. Four 6 h steps per chunk, eight requests, each on a 6 h window lagged
 # 6 h. No 24 h oceanic window starts inside a 6 h request except the first of each chunk, so
 # six of the eight are held from the window covering them. The first chunk's four resolve to
 # the init window and are primed; the second chunk's four to the ocean's first prediction.
+# DLESyM's asymmetry is exactly this: a fresh atmosphere against a stale ocean.
 PROVENANCE = {
-    "Ocean": ("'ATMO' of 'Ocean'", 2, 7, 1, 0, 0),
+    "Ocean": ("'ATMO' of 'Ocean'", 2, 8, 0, 0, 0),
     "Atmo": ("'OCEAN' of 'Atmo'", 8, 4, 4, 0, 6),
 }
 
@@ -195,7 +199,9 @@ def test_the_slow_component_gathers_the_fast_one(coupled_run):
 
 def test_each_direction_declares_its_lag(coupled_run):
     """D4: the lag is validated against the step order, and both bounds are reported."""
-    assert "forcing_lag 24:00:00, at least 18:00:00 required" in coupled_run
+    # both sit exactly on their bound: DLESyM is the freshest scheme a single-pass
+    # interleave admits, and the two minima sum to one chunk_length
+    assert "forcing_lag 18:00:00, at least 18:00:00 required" in coupled_run
     assert "forcing_lag 06:00:00, at least 06:00:00 required" in coupled_run
     assert "Step order, from couplings-file declaration order: ['Atmo', 'Ocean']." in coupled_run
 

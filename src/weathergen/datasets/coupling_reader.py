@@ -43,7 +43,6 @@ from weathergen.datasets.data_reader_base import (
     restamp,
     t_epsilon,
 )
-from weathergen.datasets.geoinfo import computed_columns
 from weathergen.datasets.tokenizer_utils import TIMES_WIDTH
 from weathergen.model.chunking import ChunkInfo
 
@@ -269,11 +268,6 @@ class DataReaderCoupling(DataReaderTimestep):
         # two independent routes that agree only by coincidence.
         self._producer = producer
 
-        # Holding a coarse source across a finer request window restamps it, and insolation
-        # and the cyclic time terms are functions of that time -- so they are recomputed for
-        # the window actually served rather than carried stale.
-        self._computed_geoinfos = computed_columns(list(self.geoinfo_channels or []))
-
         # where the producer's geoinfos sit in the target tokens it hands over
         offset = 1 + TIMES_WIDTH
         offered = len(self._geoinfo_channels_offered)
@@ -462,7 +456,7 @@ class DataReaderCoupling(DataReaderTimestep):
             f"Stream '{self._producer_stream}': request {win.start} .. {win.end} held from "
             f"source window {source_start} (shift {shift})."
         )
-        return self._clip(restamp(rdata, shift, self._computed_geoinfos), win)
+        return self._clip(restamp(rdata, shift, list(self.geoinfo_channels or [])), win)
 
     def _clip(self, rdata: ReaderData, win: DTRange) -> ReaderData:
         """Drop rows outside the requested window, which `check_reader_data` insists on."""

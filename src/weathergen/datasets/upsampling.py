@@ -239,4 +239,4 @@ class UpsamplingReader(DataReaderTimestep, WrappedDataReader):
         handler = self.time_window_handler
         shift = handler.window(target_idx).start - handler.window(source_idx).start
 
-        return restamp(rdata, shift, self._computed_geoinfos)
+        return restamp(rdata, shift, self.geoinfo_channels)
