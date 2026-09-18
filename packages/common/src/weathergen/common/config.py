@@ -215,7 +215,9 @@ def save(config: Config, mini_epoch: int | None, name: str | None = None):
         f.write(json_str)
 
 
-def load_run_config(run_id: str, mini_epoch: int | None, model_path: str | None) -> Config:
+def load_run_config(
+    run_id: str, mini_epoch: int | None, model_path: str | None, name: str | None = None
+) -> Config:
     """
     Load a configuration file from a given run_id and mini_epoch.
     If run_id is a full path, loads it from the full path.
@@ -224,6 +226,7 @@ def load_run_config(run_id: str, mini_epoch: int | None, model_path: str | None)
         run_id: Run ID of the pretrained WeatherGenerator model
         mini_epoch: Mini_epoch of the checkpoint to load. -1 indicates last checkpoint available.
         model_path: Path to the model directory. If None, uses the model_path from private config.
+        name: Optional qualifier the config was saved under, see `save`.
 
     Returns:
         Configuration object loaded from the specified run and mini_epoch.
@@ -239,8 +242,8 @@ def load_run_config(run_id: str, mini_epoch: int | None, model_path: str | None)
         else:
             path = Path(model_path) / run_id
 
-        config_path_with_epoch = path / _get_model_config_file_name(run_id, mini_epoch)
-        config_path_without_epoch = path / _get_model_config_file_name(run_id, None)
+        config_path_with_epoch = path / _get_model_config_file_name(run_id, mini_epoch, name)
+        config_path_without_epoch = path / _get_model_config_file_name(run_id, None, name)
 
         if config_path_with_epoch.exists():
             fname = config_path_with_epoch
