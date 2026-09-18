@@ -17,10 +17,10 @@ has to recompute those columns, or it hands the model a stale time of day -- an 
 to a full diurnal cycle, in the channels whose whole purpose is to say where in that cycle
 the model is.
 
-Taken from `datasets/extension.py` on the `dataset-extension` branch, which needs the same
-thing to serve windows past the end of the data. Lifted into its own module so the two
-wrappers share one implementation rather than each carrying a copy; when that branch lands it
-should import from here.
+Its own module so that every reader which reshapes a window shares one policy: the averaging
+reader collapses a window onto one stamp, the upsampling reader serves a coarse sample at a
+finer window's time, and both need the same answer to which columns are carried, which are
+evaluated at a time, and which are averaged.
 """
 
 import datetime

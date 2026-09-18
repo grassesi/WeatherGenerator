@@ -1,3 +1,21 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+"""
+Temporal averaging on top of an arbitrary timestep data reader.
+
+A stream whose native frequency is finer than the time window returns several datapoints per
+grid point per window. This wrapper collapses them to one, so that a window carries a mean over
+its length rather than an arbitrary subset of instantaneous values. The result is stamped at the
+window start, the same instant an un-averaged stream on the same grid reports for that window.
+"""
+
 import typing
 
 import numpy as np

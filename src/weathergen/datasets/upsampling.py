@@ -13,9 +13,9 @@ Present a fixed-resolution stream on a finer time grid.
 A dataset with a period coarser than the model's time window step carries no data in most
 windows: `get_dataset_indexes_timestep` returns no rows for a window that falls between two
 timesteps, so a 24 h stream read on a 6 h grid is empty three windows in four. The motivating
-case is coupled inference, where an ocean component predicts SST once per 24 h while the
-atmosphere consuming it as a dynamic forcing asks every 6 h, and an empty forcing window is not
-a stale field but an absent one, which the atmosphere never saw in training.
+case is a daily field -- SST, say -- used as a dynamic forcing by a model that steps every 6 h:
+an empty forcing window is not a stale field but an absent one, which the model never saw in
+training.
 
 This wrapper maps each requested window onto the source sample covering it -- a zero-order hold
 on a known grid, not a search for the last window that happened to carry data. A source sample
