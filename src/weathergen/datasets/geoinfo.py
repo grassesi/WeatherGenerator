@@ -202,7 +202,7 @@ def recompute_geoinfos(
         # scales with the number of stamps in the window, not with the number of points.
         for value in np.unique(datetimes):
             rows = datetimes == value
-            _evaluate_into(out, rows, coords, to_datetime(value), computed)
+            _evaluate_into(out, rows, coords[rows], to_datetime(value), computed)
         return out
 
     rows = datetimes == stamp
