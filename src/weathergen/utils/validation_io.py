@@ -30,6 +30,21 @@ def _empty_step(n_samples: int, n_ens: int, n_channels: int):
     )
 
 
+def _merge_steps(parts, lens, axis):
+    """Concatenate per-step arrays so that each sample's rows stay one contiguous run.
+
+    `OutputBatchData` slices a sample out as `sum(lens[:sample])` onwards, so the merged layout
+    has to be sample-major: every step of sample 0, then every step of sample 1, and so on.
+    """
+    offsets = [np.cumsum([0, *step_lens]) for step_lens in lens]
+    runs = [
+        part[(slice(None),) * axis + (slice(off[i], off[i + 1]),)]
+        for i in range(len(lens[0]))
+        for part, off in zip(parts, offsets, strict=True)
+    ]
+    return np.concatenate(runs, axis=axis)
+
+
 def write_output(
     cf, val_cfg, batch_size, mini_epoch, batch_idx, dn_data, batch, model_output, target_aux_out
 ):
@@ -132,6 +147,43 @@ def write_output(
     if len(preds_all) == 0 or np.array([p.shape[1] for pp in preds_all for p in pp]).sum() == 0:
         _logger.warning("Writing no data since predictions are empty.")
         return
+
+    # One store group per rollout chunk, keyed chunk index + forecast_offset: a chunk's steps
+    # become one forecast step whose points carry several valid times, which the export and
+    # evaluation readers split back out. Step 0 keeps its own source-only group, and with
+    # chunk_size unset every step is its own group, exactly as before.
+    chunk_size = val_cfg.get("forecast", {}).get("chunk_size") or 1
+    if chunk_size > 1:
+        groups: dict[int, list[int]] = {}
+        for pos, t_idx in enumerate(timestep_idxs):
+            key = t_idx
+            if t_idx >= forecast_offset:
+                key = forecast_offset + (t_idx - forecast_offset) // chunk_size
+            groups.setdefault(key, []).append(pos)
+
+        def _group(per_step, axis):
+            return [
+                [
+                    _merge_steps(
+                        [per_step[p][s] for p in ps], [targets_lens[p][s] for p in ps], axis
+                    )
+                    for s in range(len(per_step[ps[0]]))
+                ]
+                for ps in groups.values()
+            ]
+
+        preds_all = _group(preds_all, 1)
+        targets_all = _group(targets_all, 0)
+        targets_coords_all = _group(targets_coords_all, 0)
+        targets_times_all = _group(targets_times_all, 0)
+        targets_lens = [
+            [
+                [sum(ls) for ls in zip(*(targets_lens[p][s] for p in ps), strict=True)]
+                for s in range(len(targets_lens[ps[0]]))
+            ]
+            for ps in groups.values()
+        ]
+        timestep_idxs = list(groups)
 
     # collect source information
     sources = []

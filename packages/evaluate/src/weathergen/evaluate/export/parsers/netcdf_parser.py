@@ -266,8 +266,8 @@ class NetcdfParser(CfParser):
         if "sample" in ds.coords:
             ds = ds.drop_vars("sample")
 
-        n_hours = self.fstep_hours.astype("int64")
-        ds["forecast_step"] = ds["forecast_step"] * n_hours
+        # lead time from the valid times themselves, since one forecast step may hold several
+        ds["forecast_step"] = (ds["valid_time"] - reference_time) // np.timedelta64(1, "h")
         return ds
 
     def add_attrs(self, ds: xr.Dataset) -> xr.Dataset:

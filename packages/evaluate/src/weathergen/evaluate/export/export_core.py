@@ -61,6 +61,13 @@ def get_data_worker(args: tuple) -> tuple[int, int, xr.DataArray]:
     #   coords: forecast_step, channel, valid_time, lat, lon
     npoints = data_arr.shape[0]
 
+    # A forecast step can hold several valid times (one per step of a rollout chunk), each a full
+    # copy of the grid, so ipoint numbers the cells within one valid time rather than the rows.
+    ipoint = np.arange(npoints)
+    for valid_time in np.unique(times_arr):
+        rows = times_arr == valid_time
+        ipoint[rows] = np.arange(rows.sum())
+
     # Handle optional ensemble dimension: squeeze it out if present.
     if data_arr.ndim == 3 and data_arr.shape[2] == 1:
         data_arr = data_arr[:, :, 0]
@@ -69,7 +76,7 @@ def get_data_worker(args: tuple) -> tuple[int, int, xr.DataArray]:
         data_arr,
         dims=["ipoint", "channel"],
         coords={
-            "ipoint": np.arange(npoints),
+            "ipoint": ipoint,
             "channel": channels,
             "forecast_step": fstep,
             "valid_time": ("ipoint", times_arr),
