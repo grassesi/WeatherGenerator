@@ -189,3 +189,122 @@ def test_an_empty_window_averages_to_an_empty_window(reader):
     rdata = reader._get(np.int64(0), [0])
 
     assert rdata.is_empty()
+
+
+# --------------------------------------------------------------------------- the mean itself
+#
+# The tests above use points in ascending latitude, which `groupby` would leave in place even
+# if it sorted -- so they cannot see the one bug this reader has actually shipped with. These
+# use points deliberately out of sorted order.
+
+START = np.datetime64("2023-01-01T00:00")
+END = np.datetime64("2023-02-01T00:00")
+DAY = np.timedelta64(24, "h")
+PERIOD = np.timedelta64(6, "h")
+
+# Descending in latitude on purpose: pandas' groupby sorts its keys by default, which would
+# reorder the averaged rows while the coords alongside stay in reading order.
+UNSORTED_COORDS = np.array([[60.0, 10.0], [30.0, 20.0], [0.0, -30.0]], dtype=np.float32)
+
+
+class UnsortedReader(DataReaderTimestep):
+    """Three grid points, each present at `steps_per_window` times per 24 h window.
+
+    Point p, channel c at step s carries 100 p + 10 c + s, so the window mean is exact in
+    float32, differs from every individual sample, and names the point it belongs to.
+    """
+
+    def __init__(self, steps_per_window: int = 4):
+        super().__init__(
+            TimeWindowHandler(START, END, DAY, DAY), {"name": "FAKE"}, START, END, PERIOD
+        )
+        self.steps_per_window = steps_per_window
+        self.source_channels = self.target_channels = ["sst", "2t"]
+        self.source_idx = self.target_idx = [0, 1]
+        self.geoinfo_channels = ["z", "lsm"]
+        self.geoinfo_idx = [0, 1]
+        self.target_channel_weights = [1.0, 1.0]
+        self.mean, self.stdev = np.zeros(2), np.ones(2)
+        self.mean_geoinfo, self.stdev_geoinfo = np.zeros(2), np.ones(2)
+
+    def length(self) -> int:
+        return 100
+
+    def _get(self, idx, channels_idx) -> ReaderData:
+        n = len(UNSORTED_COORDS)
+        start = self.time_window_handler.window(idx).start
+        steps = range(self.steps_per_window)
+        point = 100.0 * np.arange(n, dtype=np.float32)[:, None]
+        channel = 10.0 * np.arange(len(channels_idx), dtype=np.float32)[None, :]
+        return ReaderData(
+            coords=np.concatenate([UNSORTED_COORDS for _ in steps]),
+            geoinfos=np.ones((n * self.steps_per_window, 2), dtype=np.float32),
+            data=np.concatenate([point + channel + s for s in steps]).astype(np.float32),
+            datetimes=np.concatenate([np.full(n, start + s * PERIOD) for s in steps]).astype(
+                "datetime64[ns]"
+            ),
+        )
+
+
+def test_duplicate_grid_points_are_collapsed_to_their_mean():
+    rdata = AveragingReader(UnsortedReader(steps_per_window=4)).get_source(np.int64(3))
+
+    assert rdata.data.shape == (len(UNSORTED_COORDS), 2)
+    # mean over steps 0..3 is 1.5, added to the point/channel base
+    expected = np.array([[1.5, 11.5], [101.5, 111.5], [201.5, 211.5]], dtype=np.float32)
+    np.testing.assert_allclose(rdata.data, expected)
+
+
+def test_coords_stay_aligned_with_their_data():
+    """Regression test: `groupby` sorts its keys unless told not to, while the coords are taken
+    in reading order. If the two disagree every point gets another point's values -- silently,
+    since both arrays keep their shape. Verified by mutation: `sort=True` fails this."""
+    rdata = AveragingReader(UnsortedReader(steps_per_window=4)).get_source(np.int64(0))
+
+    np.testing.assert_allclose(rdata.coords, UNSORTED_COORDS)
+    for row, coord in enumerate(rdata.coords):
+        point = int(np.flatnonzero((coord == UNSORTED_COORDS).all(axis=1))[0])
+        # channel 0 of point p averages to 100 p + 1.5
+        assert rdata.data[row, 0] == pytest.approx(100.0 * point + 1.5)
+
+
+def test_single_step_per_window_is_the_identity_on_values():
+    rdata = AveragingReader(UnsortedReader(steps_per_window=1)).get_source(np.int64(5))
+
+    np.testing.assert_allclose(rdata.coords, UNSORTED_COORDS)
+    np.testing.assert_allclose(
+        rdata.data, np.array([[0.0, 10.0], [100.0, 110.0], [200.0, 210.0]], dtype=np.float32)
+    )
+
+
+def test_target_side_is_averaged_too():
+    reader = AveragingReader(UnsortedReader(steps_per_window=4))
+
+    np.testing.assert_allclose(
+        reader.get_source(np.int64(7)).data, reader.get_target(np.int64(7)).data
+    )
+
+
+def test_metadata_is_forwarded():
+    wrapped = UnsortedReader()
+    reader = AveragingReader(wrapped)
+
+    assert reader.source_channels == wrapped.source_channels
+    assert reader.target_channels == wrapped.target_channels
+    assert reader.geoinfo_channels == wrapped.geoinfo_channels
+    assert reader.target_channel_weights == wrapped.target_channel_weights
+    assert reader.period == wrapped.period
+    assert reader.length() == wrapped.length()
+    np.testing.assert_allclose(reader.mean, wrapped.mean)
+    np.testing.assert_allclose(reader.stdev, wrapped.stdev)
+
+
+def test_normalization_sees_the_averaged_values():
+    wrapped = UnsortedReader(steps_per_window=4)
+    wrapped.mean = np.array([1.5, 11.5])
+    reader = AveragingReader(wrapped)
+
+    normalized = reader.normalize_source_channels(reader.get_source(np.int64(0)).data)
+
+    # point 0 sits exactly on the mean after averaging, so it normalizes to zero
+    np.testing.assert_allclose(normalized[0], [0.0, 0.0], atol=1e-6)
