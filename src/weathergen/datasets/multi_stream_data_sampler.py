@@ -131,12 +131,11 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         # Stride between successive samples, in index units. window(idx) is
         # start_date + idx * time_window_step, so components on different sampling grids only
         # share an absolute time axis if each strides by its own count of windows. Set by the
-        # coupled driver, which owns the duration -> index conversion; 1 everywhere else, which
-        # is the previous behaviour exactly.
-        self.sample_stride = int(mode_cfg.get("sample_stride", 1))
-        assert self.sample_stride >= 1, (
-            f"sample_stride must be >= 1, got {self.sample_stride}."
-        )
+        # coupled driver, which owns the duration -> index conversion (as init_stride_chunks,
+        # converted to forecast steps in Coupler._derive_component_configs); 1 everywhere else,
+        # which is the previous behaviour exactly.
+        self.sample_stride = int(mode_cfg.get("init_stride_fsteps", 1))
+        self._check_stride_config(self.shuffle, self.sample_stride)
 
         self.len_timedelta = mode_cfg.time_window_len
         self.step_timedelta = mode_cfg.time_window_step
@@ -176,8 +175,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             // self.step_timedelta  # as number of indexs
         )
 
-        # only every sample_stride-th index is ever visited
-        available_samples = (max_index // self.sample_stride) * self.batch_size
+        # max_index is the last viable index, inclusive, and only every sample_stride-th
+        # index is visited, so the on-grid indices in [0, max_index] number
+        # floor(max_index / sample_stride) + 1
+        available_samples = (max_index // self.sample_stride + 1) * self.batch_size
 
         assert available_samples > 0, (
             "There is an insufficient date range to \
@@ -228,6 +229,15 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         perms_len -= (fsm + self.output_offset) * (self.time_step // self.step_timedelta)
 
         return np.arange(perms_len)
+
+    @staticmethod
+    def _check_stride_config(shuffle: bool, sample_stride: int) -> None:
+        """init_stride_design.md S3: a stride walks a shuffled permutation and spaces nothing."""
+        assert sample_stride >= 1, f"init_stride_fsteps must be >= 1, got {sample_stride}."
+        assert not (shuffle and sample_stride > 1), (
+            f"init_stride_fsteps={sample_stride} spaces out initializations, which "
+            "shuffle=True does not preserve. Set shuffle: False or init_stride_fsteps: 1."
+        )
 
     def _forecast_time_step(self) -> np.timedelta64:
         """Time between two forecast steps, falling back to the window step when not forecasting.

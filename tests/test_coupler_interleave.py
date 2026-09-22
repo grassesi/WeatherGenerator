@@ -325,8 +325,25 @@ def test_num_steps_follows_from_num_chunks():
 def test_sample_stride_puts_components_on_one_time_axis():
     out = derive(atmo_ocean_cfs(), ATMO_OCEAN, make_rollout(chunk_length="24:00:00"))
 
-    assert out["Atmo"].sample_stride == 4
-    assert out["Ocean"].sample_stride == 1
+    assert out["Atmo"].init_stride_fsteps == 4
+    assert out["Ocean"].init_stride_fsteps == 1
+
+
+def test_init_stride_chunks_scales_every_component_stride():
+    """init_stride_chunks widens the gap between successive initializations everywhere."""
+    out = derive(
+        atmo_ocean_cfs(),
+        ATMO_OCEAN,
+        make_rollout(chunk_length="24:00:00", init_stride_chunks=3),
+    )
+
+    assert out["Atmo"].init_stride_fsteps == 12
+    assert out["Ocean"].init_stride_fsteps == 3
+
+
+def test_init_stride_chunks_below_one_is_rejected():
+    with pytest.raises(ValueError, match="init_stride_chunks"):
+        make_rollout(init_stride_chunks=0)
 
 
 def test_component_time_step_survives_the_derivation():

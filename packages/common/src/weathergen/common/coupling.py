@@ -110,6 +110,10 @@ class Rollout:
     forecast_offset: int = 1
     num_workers: int = 0 # Dont use forked pools of workers for dataloaders
     accumulate_chunks: bool = False
+    # spacing between successive initialization times, in chunks (init_stride_design.md D).
+    # Chunks are the unit shared by every component regardless of its own cadence. 1 keeps the
+    # previous behaviour: each batch's initialization is exactly one chunk after the last.
+    init_stride_chunks: int = 1
 
     @classmethod
     def from_config(cls, cfg) -> Rollout:
@@ -128,9 +132,10 @@ class Rollout:
             forecast_offset=int(cfg.get("forecast_offset", 1)),
             num_workers=int(cfg.get("num_workers", 0)),
             accumulate_chunks=bool(cfg.get("accumulate_chunks", False)),
+            init_stride_chunks=int(cfg.get("init_stride_chunks", 1)),
         )
 
-        for key in ("num_chunks", "num_samples"):
+        for key in ("num_chunks", "num_samples", "init_stride_chunks"):
             if getattr(rollout, key) < 1:
                 msg = f"rollout.{key} must be >= 1, got {getattr(rollout, key)}."
                 raise ValueError(msg)
@@ -565,18 +570,20 @@ class Coupler:
             fsteps_per_chunk = self._exact_ratio(
                 rollout.chunk_length, time_step, name, "forecast.time_step"
             )
-            sample_stride = self._exact_ratio(
+            windows_per_chunk = self._exact_ratio(
                 rollout.chunk_length, window_step, name, "time_window_step"
             )
+            init_stride_fsteps = rollout.init_stride_chunks * windows_per_chunk
 
             overrides = {
                 "start_date": f"${{{config._DATETIME_TYPE_NAME}:{rollout.start_date}}}",
                 "end_date": f"${{{config._DATETIME_TYPE_NAME}:{rollout.end_date}}}",
                 "_start_date": rollout.start_date,
                 "_end_date": rollout.end_date,
-                # successive initial conditions are one chunk apart; the sampler strides in
-                # index units, so each component covers the same absolute times
-                "sample_stride": sample_stride,
+                # successive initial conditions are init_stride_chunks chunks apart; the
+                # sampler strides in index units, so each component covers the same absolute
+                # times (init_stride_design.md D, S2)
+                "init_stride_fsteps": init_stride_fsteps,
                 # inference writes every sample it runs, which only holds at batch size 1
                 "samples_per_mini_epoch": rollout.num_samples,
                 # each component shuffles with its own rng_seed, so they would otherwise
@@ -605,7 +612,7 @@ class Coupler:
             self._fsteps_per_chunk[name] = fsteps_per_chunk
 
             self._warn_on_overwrite(
-                name, test_cfg, overrides, fsteps_per_chunk, sample_stride, rollout.num_workers
+                name, test_cfg, overrides, fsteps_per_chunk, init_stride_fsteps, rollout.num_workers
             )
 
             if not overrides["output"]["streams"]:
@@ -673,7 +680,7 @@ class Coupler:
         test_cfg,
         overrides: dict,
         fsteps_per_chunk: int,
-        sample_stride: int,
+        init_stride_fsteps: int,
         num_workers: int,
     ) -> None:
         """Say what the rollout spec is taking over, so nothing changes silently."""
@@ -695,7 +702,7 @@ class Coupler:
         logger.info(
             f"Component {name!r}: chunk_size={fsteps_per_chunk}, "
             f"num_steps={overrides['forecast']['num_steps']} (was {num_steps}), "
-            f"sample_stride={sample_stride}, "
+            f"init_stride_fsteps={init_stride_fsteps}, "
             f"accumulate_chunks={overrides['forecast']['accumulate_chunks']}, "
             f"num_workers={num_workers}, "
             f"output.streams={overrides['output']['streams']}"
