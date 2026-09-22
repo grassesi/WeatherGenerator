@@ -26,8 +26,10 @@ from weathergen.datasets.data_reader_base import (
     ReaderData,
     TimeWindowHandler,
     WrappedDataReader,
+    rebase_innermost,
     shifted,
 )
+from weathergen.datasets.elevation import ElevatingReader
 from weathergen.datasets.stream_data import StreamData
 from weathergen.datasets.tokenizer_utils import TIMES_WIDTH, VERTEX_WIDTH
 from weathergen.model.chunking import ChunkInfo
@@ -1176,3 +1178,84 @@ def test_get_routes_to_source_and_target_by_channel_list(consumer_handler, produ
 
     with pytest.raises(ValueError, match="neither"):
         coupled._get(idx, [7])
+
+
+# ---------------------------------------------------------------------------------------------
+# the rebase contract, and the metadata it rests on (`coupling_reader_placement.md` G.2, G.3)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_rebasing_a_stack_leaves_the_original_untouched(consumer_handler, producer_handler):
+    """P4: a stream's readers are shared with the sampler, so the rebase must not mutate them.
+
+    `rebased` shallow-copies every wrapper on the way down rather than reconstructing it, which
+    is only safe if the copy is what gets redirected. Were the wrappers shared with the
+    original, redirecting a forcing would silently change what the batch itself reads.
+    """
+
+    base = StampedReader(consumer_handler)
+    inner_wrapper = AveragingReader(base)
+    stack = ElevatingReader(inner_wrapper, CONSUMER_START, H6)
+    replacement = StampedReader(producer_handler)
+
+    seen = []
+
+    def make_inner(reader):
+        seen.append(reader)
+        return replacement
+
+    rebased = rebase_innermost(stack, make_inner)
+
+    assert seen == [base], "make_inner is called on the innermost reader, not on a wrapper"
+
+    # the original stack still reads its own base, all the way down
+    assert stack._wrapped_reader is inner_wrapper
+    assert stack._wrapped_reader._wrapped_reader is base
+
+    # the clone reads the replacement, and every wrapper of it is a distinct object
+    assert rebased._wrapped_reader._wrapped_reader is replacement
+    assert rebased is not stack
+    assert rebased._wrapped_reader is not inner_wrapper
+
+
+def test_a_bare_reader_is_replaced_rather_than_rebased(consumer_handler, producer_handler):
+    """`rebase_innermost` also accepts a stream whose reader carries no wrappers at all."""
+
+    base = StampedReader(consumer_handler)
+    replacement = StampedReader(producer_handler)
+
+    assert rebase_innermost(base, lambda reader: replacement) is replacement
+
+
+def test_the_reader_refuses_a_producer_that_cannot_supply_the_consumers_channels(
+    consumer_handler, producer_handler
+):
+    """P5/F1: the channel map is resolved by name at construction, and a gap raises there.
+
+    F1's shape: the two components carry their own channel lists for the same stream, agreeing
+    in neither order nor length. A subset in a different order is the normal case and must be
+    accepted; a channel the producer never emits must be refused while the message can still
+    name it, rather than surfacing as a silently mislabelled column at rollout.
+    """
+
+    def atmosphere() -> StampedReader:
+        producer = StampedReader(producer_handler)
+        producer.target_channels = ["10u", "10v", "2t"]
+        producer.target_idx = [0, 1, 2]
+        return producer
+
+    def ocean(sources: list[str]) -> StampedReader:
+        consumer = StampedReader(consumer_handler)
+        consumer.source_channels = sources
+        consumer.source_idx = list(range(len(sources)))
+        return consumer
+
+    # a subset, in the producer's reverse order: selected by name, so the order is irrelevant
+    reordered = DataReaderCoupling(ocean(["10v", "10u"]), STREAM, producer=atmosphere())
+    assert list(reordered._pred_cols) == [1, 0], "the columns follow the consumer's own order"
+
+    # z_1000 is a channel this atmosphere never emits. Match the constructed message, not just
+    # the channel name: with the check removed, `offered.index` raises a bare "not in list"
+    # ValueError that also carries the name, so a looser assertion passes vacuously.
+    with pytest.raises(ValueError, match="does not supply the channels.*z_1000"):
+        DataReaderCoupling(ocean(["10u", "10v", "z_1000"]), STREAM, producer=atmosphere())
