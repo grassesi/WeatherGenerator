@@ -78,7 +78,13 @@ class TrainerBase:
             # Called using SLURM instead of torchrun
             world_size = int(os.environ.get("SLURM_NTASKS", "1"))
 
-        if not dist.is_initialized() and world_size > 1:
+        if dist.is_initialized():
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+            local_rank = int(
+                os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID"))
+            )
+        elif world_size > 1:
             # These environment variables are typically set by the launch utility
             # (e.g., torchrun, Slurm)
             local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
