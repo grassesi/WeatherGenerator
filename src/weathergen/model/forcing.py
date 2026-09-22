@@ -52,16 +52,11 @@ class ForcedModel(Model):
     def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size):
         super().__init__(cf, sources_size, targets_num_channels, targets_coords_size)
 
-        n_blocks_forcing = self.cf.get("ffe_num_blocks", 0)
-        self.forcing_engine = (
-            ForcingEngine(self.cf, n_blocks_forcing) if n_blocks_forcing > 0 else None
-        )
+        self.forcing_engine = ForcingEngine(self.cf, self.cf.get("ffe_num_blocks", 0))
 
     def _gather_parameters(self) -> dict[str, int]:
         num_params = super()._gather_parameters()
-        num_params["ffe"] = (
-            get_num_parameters(self.forcing_engine.blocks) if self.forcing_engine is not None else 0
-        )
+        num_params["ffe"] = get_num_parameters(self.forcing_engine.blocks)
         return num_params
 
     def _print_components(self, num_params):
@@ -109,7 +104,7 @@ class ForcedModel(Model):
             # with the forecast step whenever `forecast.time_step > time_window_step`.
             forcing_idx = step * chunk.step_stride
 
-            if self.forcing_engine and not dynamic_forcings.is_empty:
+            if not dynamic_forcings.is_empty:
                 # reembedd forcings
                 forcing_sampling_idxs = [
                     sample_idx + forcing_idx for sample_idx in source_sampling_idxs
