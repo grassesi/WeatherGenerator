@@ -1130,3 +1130,49 @@ def test_only_the_dlesym_lag_gathers_the_atmosphere_at_the_target_time():
 
     assert reach[18] == target, "18 h reaches the atmosphere at the ocean's own target time"
     assert reach[24] == target - H6, "24 h stops one atmospheric step short of it"
+
+
+# ---------------------------------------------------------------------------------------------
+# source and target are two behaviours, and _get only routes between them
+# ---------------------------------------------------------------------------------------------
+
+
+def _coupled(consumer_handler, producer_handler) -> DataReaderCoupling:
+    return DataReaderCoupling(
+        StampedReader(consumer_handler),
+        STREAM,
+        producer=StampedReader(producer_handler),
+        request_handler=shifted(consumer_handler, H24),
+        init_time=np.datetime64("2030-01-01T00:00"),
+    )
+
+
+def test_a_coupled_stream_refuses_to_serve_targets(consumer_handler, producer_handler):
+    """A forcing has no targets, and the wrappers above delegate `get_target` down to here.
+
+    Returning empty would let a stream that is only ever an input score as if it were an
+    output; raising names the caller instead (`coupling_reader_placement.md` F1).
+    """
+
+    coupled = _coupled(consumer_handler, producer_handler)
+
+    assert coupled.target_idx == [], "a coupled stream carries no target channels"
+    with pytest.raises(NotImplementedError, match=STREAM):
+        coupled.get_target(idx_of(consumer_handler, CONSUMER_START))
+
+
+def test_get_routes_to_source_and_target_by_channel_list(consumer_handler, producer_handler):
+    """`_get` decides which of the two it is, since the wrappers reach the reader both ways."""
+
+    coupled = _coupled(consumer_handler, producer_handler)
+    idx = idx_of(consumer_handler, CONSUMER_START + 2 * H24)
+
+    routed = coupled._get(idx, coupled.source_idx)
+    direct = _coupled(consumer_handler, producer_handler).get_source(idx)
+    assert served_times(routed) == served_times(direct), "the source list routes to get_source"
+
+    with pytest.raises(NotImplementedError):
+        coupled._get(idx, coupled.target_idx)
+
+    with pytest.raises(ValueError, match="neither"):
+        coupled._get(idx, [7])

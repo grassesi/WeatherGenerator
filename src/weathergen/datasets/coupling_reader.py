@@ -427,7 +427,8 @@ class DataReaderCoupling(DataReaderTimestep):
         handler = self._source_handler
         return np.int64((when - handler.t_start) // handler.t_window_step)
 
-    def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
+    @typing.override
+    def get_source(self, idx: TIndex) -> ReaderData:
         """Resolve one forcing request: gather the source windows inside it, or hold one.
 
         `idx` is an index on the *consumer's* timeline. It is resolved against
@@ -436,6 +437,7 @@ class DataReaderCoupling(DataReaderTimestep):
         index as the producer would have read it.
         """
 
+        channels_idx = self.source_idx
         win = self._request_handler.window(idx)
         self.provenance.requests += 1
 
@@ -470,6 +472,44 @@ class DataReaderCoupling(DataReaderTimestep):
             f"source window {source_start} (shift {shift})."
         )
         return self._clip(restamp(rdata, shift, list(self.geoinfo_channels or [])), win)
+
+    @typing.override
+    def get_target(self, idx: TIndex) -> ReaderData:
+        """A coupled stream is a forcing, so it has no targets to serve.
+
+        `target_idx` is empty on every coupled stream, and the wrappers above this one
+        delegate `get_target` downwards unconditionally, so this is reachable rather than
+        theoretical (`coupling_reader_placement.md` F1). Raising names the caller; returning
+        empty would let a stream that should never be a target silently score as one.
+        """
+
+        msg = (
+            f"Stream {self._producer_stream!r} is coupled, so it carries no target data: it is "
+            f"forced by component {self._producer!r} and has an empty target channel list. "
+            "Something asked a forcing stream for targets."
+        )
+        raise NotImplementedError(msg)
+
+    def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
+        """Dispatch to `get_source`/`get_target`, which hold the behaviour.
+
+        The wrappers above this reader reach it both ways: `AveragingReader._get` passes a
+        channel list straight down, while `ElevatingReader.get_target` calls the public method.
+        Keying on the list the caller asked for keeps both routes on the same two behaviours.
+        """
+
+        asked = list(channels_idx)
+        if asked == self.source_idx:
+            return self.get_source(idx)
+        if asked == self.target_idx:
+            return self.get_target(idx)
+
+        msg = (
+            f"Stream {self._producer_stream!r} was asked for channels {asked}, which are neither "
+            f"its source channels {self.source_idx} nor its target channels {self.target_idx}. "
+            "A coupling reader serves whole channel lists, not arbitrary subsets."
+        )
+        raise ValueError(msg)
 
     def _clip(self, rdata: ReaderData, win: DTRange) -> ReaderData:
         """Drop rows outside the requested window, which `check_reader_data` insists on."""
