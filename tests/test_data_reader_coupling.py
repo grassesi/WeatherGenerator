@@ -750,6 +750,24 @@ def test_spoofed_producer_steps_abort_the_coupling(consumer, producer, coords):
         reader.add_chunk(output, batch)
 
 
+def test_a_chunk_without_a_timeline_is_refused(consumer, producer, coords):
+    """A tile without its handler cannot be placed, and there is no stride to guess with.
+
+    The constructor stride this used to fall back to was never set from the producer, so a
+    producer stepping more than one window per forecast step would have been stamped on the
+    wrong windows -- and the completeness assert, which counted the windows against
+    themselves in that branch, would have passed.
+    """
+    output, batch = build_chunk(
+        producer.time_window_handler, np.datetime64("2023-01-02T00:00"), coords
+    )
+    output.chunk = dataclasses.replace(output.chunk, time_window_handler=None)
+
+    reader = DataReaderCoupling(consumer, STREAM, producer=producer)
+    with pytest.raises(ValueError, match="carries no ChunkInfo with a time_window_handler"):
+        reader.add_chunk(output, batch)
+
+
 def test_geometry_is_read_off_the_source_sample(consumer, consumer_handler, producer, coords):
     """Coords and times come from the source half, never from a target half that is present.
 

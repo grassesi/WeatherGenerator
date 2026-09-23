@@ -137,7 +137,6 @@ class DataReaderCoupling(DataReaderTimestep):
         request_handler: TimeWindowHandler | None = None,
         is_forced: bool = True,
         init_time: NPDT64 | None = None,
-        forecast_step_stride: int = 1,
         max_chunks: int = 2,
         provenance: ForcingProvenance | None = None,
     ) -> None:
@@ -167,9 +166,6 @@ class DataReaderCoupling(DataReaderTimestep):
             an initial condition and comes from the producer's own data however far into the
             rollout it is requested. Pushed in per batch; it cannot be learned from the first
             dispatched chunk, because the first request precedes the first dispatch.
-        forecast_step_stride :
-            Dataset indices advanced per forecast step on the producer side. Only a fallback:
-            a dispatched chunk carries its own `ChunkInfo`, which is preferred.
         max_chunks :
             Dispatched chunks kept. Two -- the current one and the one before it -- covers
             every lag up to `chunk_length`, because a request window's left edge is always
@@ -194,7 +190,6 @@ class DataReaderCoupling(DataReaderTimestep):
         self._producer_stream = producer_stream
         self._is_forced = bool(is_forced)
         self._init_time = init_time
-        self._stride = int(forecast_step_stride)
         self._max_chunks = max(1, int(max_chunks))
         self._length = dataset.length()
         self.provenance = provenance or ForcingProvenance(stream=producer_stream)
@@ -633,12 +628,12 @@ class DataReaderCoupling(DataReaderTimestep):
                 )
                 windows[valid_time] = window
 
-        expected = len(tile.predicted_steps) if tile is not None else len(windows)
+        expected = len(tile.predicted_steps)
         stored = _StoredChunk(index=self._dispatched, expected=expected, windows=windows)
         assert stored.is_complete, (
             f"Coupled stream '{self._producer_stream}': chunk {stored.index} emitted "
             f"{len(windows)} windows, but its tile predicts {expected} steps "
-            f"{tile.predicted_steps if tile is not None else ()}. A consumer would read a "
+            f"{tile.predicted_steps}. A consumer would read a "
             "gap as an absent forcing rather than as a missing emission."
         )
 
@@ -646,19 +641,25 @@ class DataReaderCoupling(DataReaderTimestep):
         self._chunks = [*self._chunks, stored][-self._max_chunks :]
         self._dispatched += 1
 
-    def _producer_tile(self, chunk: ModelOutput) -> ChunkInfo | None:
+    def _producer_tile(self, chunk: ModelOutput) -> ChunkInfo:
         """The producer's own description of the chunk it just emitted.
 
         The timeline a prediction is stamped on and the stride between its forecast steps
         belong to the *producing* component. They used to be constructor arguments of this
         reader, which is how they came to be left unset: `subscribe()` filled three of six.
-        Riding along inside the ModelOutput, they cannot be forgotten -- so prefer them, and
-        fall back to what the constructor was given only when a chunk carries no tile.
+        Riding along inside the ModelOutput, they cannot be forgotten. A chunk without them
+        cannot be placed, and guessing a stride would stamp it on the wrong windows while
+        disabling the completeness check below, so it is refused.
         """
 
         tile = getattr(chunk, "chunk", None)
         if tile is None or tile.time_window_handler is None:
-            return None
+            msg = (
+                f"Coupled stream '{self._producer_stream}': a dispatched chunk carries no "
+                "ChunkInfo with a time_window_handler, so its predictions cannot be placed on "
+                "the producer's timeline."
+            )
+            raise ValueError(msg)
 
         return tile
 
@@ -668,7 +669,7 @@ class DataReaderCoupling(DataReaderTimestep):
         i_source: int,
         pred: torch.Tensor,
         batch: ModelBatch,
-        tile: ChunkInfo | None = None,
+        tile: ChunkInfo,
     ) -> tuple[NPDT64, ReaderData]:
         """Pair one prediction with its geometry and bring it to physical space.
 
@@ -707,12 +708,8 @@ class DataReaderCoupling(DataReaderTimestep):
         # select the channels the consumer expects and denormalize them
         data = data[:, self._pred_cols] * self._pred_stdev + self._pred_mean
 
-        if tile is not None:
-            valid_idx = tile.window_idx(source_data.sample_idx, fstep)
-            valid_time = tile.time_window_handler.window(valid_idx).start
-        else:
-            valid_idx = source_data.sample_idx + fstep * self._stride
-            valid_time = self._source_handler.window(valid_idx).start
+        valid_idx = tile.window_idx(source_data.sample_idx, fstep)
+        valid_time = tile.time_window_handler.window(valid_idx).start
 
         return valid_time, ReaderData(
             coords=coords.astype(np.float32),

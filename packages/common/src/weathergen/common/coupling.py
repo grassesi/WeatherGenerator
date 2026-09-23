@@ -383,8 +383,6 @@ class Coupler:
         # afterwards means asking what type its outermost reader is, and that answer changes
         # the moment anything wraps it.
         self._substituted: set[tuple[str, str]] = set()
-        # per component, filled by _derive_component_configs and read by subscribe()
-        self._fsteps_per_chunk: dict[str, int] = {}
         # producer -> readers waiting for its chunks
         self._subscribers: dict[str, list[DataReaderCoupling]] = {}
         # component -> start of the current batch's initialization window, pushed into every
@@ -690,8 +688,6 @@ class Coupler:
                 },
                 "model_input": self._batch_size_one(name, test_cfg),
             }
-
-            self._fsteps_per_chunk[name] = fsteps_per_chunk
 
             self._warn_on_overwrite(
                 name, test_cfg, overrides, fsteps_per_chunk, init_stride_fsteps, rollout.num_workers
@@ -1321,13 +1317,11 @@ class Coupler:
                     )
                     raise ValueError(msg)
 
-                forecast_step_stride = 1 # TODO determine automatically (from chunkizes)
                 producer_reader = self._producer_reader(coupling.producer, stream)
                 init_time = self._init_times.get(coupling.producer)
                 built: list[DataReaderCoupling] = []
 
-                def _make_inner(base, _p=producer_reader, _s=stream, _b=built,
-                                _stride=forecast_step_stride, _init=init_time):
+                def _make_inner(base, _p=producer_reader, _s=stream, _b=built, _init=init_time):
                     # The training path already read this stream through a coupling reader, on
                     # the lagged timeline. Rebuild from the disk reader underneath it rather
                     # than wrapping it, and keep its handler and its tally: the lag is the
@@ -1346,7 +1340,6 @@ class Coupler:
                         request_handler=request_handler,
                         is_forced=True,
                         init_time=_init,
-                        forecast_step_stride=_stride,
                         provenance=provenance,
                     )
                     _b.append(coupled)
