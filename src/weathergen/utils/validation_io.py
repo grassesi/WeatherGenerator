@@ -11,6 +11,7 @@ import logging
 
 import numpy as np
 import torch
+from numpy.typing import NDArray
 
 import weathergen.common.config as config
 import weathergen.common.io as io
@@ -28,6 +29,13 @@ def _empty_step(n_samples: int, n_ens: int, n_channels: int):
         [np.zeros((0, 2), dtype=np.float32) for _ in range(n_samples)],
         [np.array([]).astype("datetime64[ns]") for _ in range(n_samples)],
     )
+
+
+def _to_numpy(array) -> NDArray:
+    """Coordinates arrive as tensors from the target half and as arrays from the source half."""
+    if isinstance(array, torch.Tensor):
+        return array.detach().cpu().numpy()
+    return np.asarray(array)
 
 
 def _merge_steps(parts, lens, axis):
@@ -64,6 +72,7 @@ def write_output(
     # collect all target / prediction-related information
     fp32 = torch.float32
     preds_all, targets_all, targets_coords_all, targets_times_all = [], [], [], []
+    preds_coords_all, preds_times_all = [], []
 
     # _get_output_length clamps to at least one output step, so this always holds
     assert len(batch.get_output_idxs()) > 0, "Batch carries no output steps."
@@ -75,13 +84,17 @@ def write_output(
 
     n_samples = len(batch.get_source_samples().get_samples())
     targets_lens = []
+    preds_lens = []
 
     for t_idx in timestep_idxs:
         preds_all += [[]]
         targets_all += [[]]
         targets_coords_all += [[]]
         targets_times_all += [[]]
+        preds_coords_all += [[]]
+        preds_times_all += [[]]
         targets_lens += [[]]
+        preds_lens += [[]]
         for sname in cf.streams.keys():
             chunk_idx = model_output.chunk_idx(t_idx)
             assert model_output.forecast_steps[chunk_idx] == t_idx, (
@@ -94,55 +107,78 @@ def write_output(
             # leading empty steps of the first chunk carry a source but no target/prediction
             if t_idx < forecast_offset:
                 preds_s, targets_s, t_coords_s, t_times_s = _empty_step(n_samples, 1, n_channels)
-
-            # handle spoof data: do not write since it might corrupt validation (spoofing invisible
-            # there)
-            elif target_aux_out.physical[t_idx][sname]["is_spoof"][0]:
-                preds = model_output.get_physical_prediction(chunk_idx, sname)
-                n_ens = preds[0].shape[0] if preds is not None and len(preds) > 0 else 1
-                preds_s, targets_s, t_coords_s, t_times_s = _empty_step(
-                    n_samples, n_ens, n_channels
-                )
+                preds_coords_s, preds_times_s = t_coords_s, t_times_s
 
             else:
                 preds = model_output.get_physical_prediction(chunk_idx, sname)
                 targets = target_aux_out.physical[t_idx][sname]["target"]
 
                 preds_s, targets_s, t_coords_s, t_times_s = [], [], [], []
+                preds_coords_s, preds_times_s = [], []
+
+                # spoofed step: the target window lies outside the dataset, so the prediction
+                # is written in full at the fallback geometry and the target is left empty
+                is_spoof = target_aux_out.physical[t_idx][sname]["is_spoof"][0]
+                if is_spoof:
+                    _logger.debug(
+                        f"Stream '{sname}' at t_idx={t_idx} is spoof "
+                        "(target time window is outside the dataset range); "
+                        "writing model predictions with empty targets."
+                    )
 
                 # handle forcing streams or if sample is empty
                 if preds is None:
                     # preds are empty so create copy of target and add ensemble dimension
                     assert targets[0].shape[0] == 0, "Empty preds but non-empty targets."
-                    preds = [target.clone().unsqueeze(0) for target in targets]
+                    preds = [
+                        target.reshape(0, n_channels).unsqueeze(0)
+                        if target.numel() == 0
+                        else target.clone().unsqueeze(0)
+                        for target in targets
+                    ]
 
                 for i_batch, (pred, target) in enumerate(zip(preds, targets, strict=True)):
                     target_data = target_aux_out.physical[t_idx][sname]
                     t_coords = target_data["target_coords"][i_batch]
                     t_times = target_data["target_times"][i_batch]
 
-                    idxs_inv = target_aux_out.physical[t_idx][sname]["idxs_inv"][i_batch]
-                    if idxs_inv is not None:
+                    # without a target half (inference_only) there is no reordering, and rows
+                    # stay in token order, which is the order of the coords they came with
+                    idxs_inv = target_data["idxs_inv"][i_batch]
+                    if idxs_inv is not None and (
+                        not isinstance(idxs_inv, torch.Tensor) or idxs_inv.numel() > 0
+                    ):
                         pred = pred[:, idxs_inv]
-                        target = target[idxs_inv]
                         t_coords = t_coords[idxs_inv]
                         t_times = t_times[idxs_inv]
+                        if not is_spoof:
+                            target = target[idxs_inv]
 
-                    # denormalize data if requested and map to storage format
+                    # denormalize predictions and map to storage format
                     preds_s += [dn_data(sname, pred.to(fp32)).detach().cpu().numpy()]
-                    targets_s += [dn_data(sname, target.to(fp32)).detach().cpu().numpy()]
+                    preds_coords_s += [_to_numpy(t_coords)]
+                    preds_times_s += [np.asarray(t_times).astype("datetime64[ns]")]
 
-                    # extract original target coords and times from target data
-                    t_coords_s += [t_coords.cpu().numpy()]
-                    t_times_s += [t_times.astype("datetime64[ns]")]
+                    if is_spoof or target.numel() == 0:
+                        # no ground truth for this step: write an empty target so the store
+                        # signals it, while the prediction above is written in full
+                        targets_s += [np.zeros((0, n_channels), dtype=np.float32)]
+                        t_coords_s += [np.zeros((0, 2), dtype=np.float32)]
+                        t_times_s += [np.array([], dtype="datetime64[ns]")]
+                    else:
+                        targets_s += [dn_data(sname, target.to(fp32)).detach().cpu().numpy()]
+                        t_coords_s += [_to_numpy(t_coords)]
+                        t_times_s += [np.asarray(t_times).astype("datetime64[ns]")]
 
-            targets_lens[-1] += [[]]
-            targets_lens[-1][-1] += [t.shape[0] for t in targets_s]
+            targets_lens[-1] += [[t.shape[0] for t in t_coords_s]]
+            preds_lens[-1] += [[p.shape[0] for p in preds_coords_s]]
 
             preds_all[-1] += [np.concatenate(preds_s, axis=1)]
             targets_all[-1] += [np.concatenate(targets_s)]
             targets_coords_all[-1] += [np.concatenate(t_coords_s)]
             targets_times_all[-1] += [np.concatenate(t_times_s)]
+            preds_coords_all[-1] += [np.concatenate(preds_coords_s)]
+            preds_times_all[-1] += [np.concatenate(preds_times_s)]
 
     if len(preds_all) == 0 or np.array([p.shape[1] for pp in preds_all for p in pp]).sum() == 0:
         _logger.warning("Writing no data since predictions are empty.")
@@ -161,28 +197,34 @@ def write_output(
                 key = forecast_offset + (t_idx - forecast_offset) // chunk_size
             groups.setdefault(key, []).append(pos)
 
-        def _group(per_step, axis):
+        # predictions and targets can differ in row count (a spoofed or target-less step
+        # holds predictions but no target), so each is sliced by its own lens
+        def _group(per_step, lens, axis):
             return [
                 [
-                    _merge_steps(
-                        [per_step[p][s] for p in ps], [targets_lens[p][s] for p in ps], axis
-                    )
+                    _merge_steps([per_step[p][s] for p in ps], [lens[p][s] for p in ps], axis)
                     for s in range(len(per_step[ps[0]]))
                 ]
                 for ps in groups.values()
             ]
 
-        preds_all = _group(preds_all, 1)
-        targets_all = _group(targets_all, 0)
-        targets_coords_all = _group(targets_coords_all, 0)
-        targets_times_all = _group(targets_times_all, 0)
-        targets_lens = [
-            [
-                [sum(ls) for ls in zip(*(targets_lens[p][s] for p in ps), strict=True)]
-                for s in range(len(targets_lens[ps[0]]))
+        def _group_lens(lens):
+            return [
+                [
+                    [sum(ls) for ls in zip(*(lens[p][s] for p in ps), strict=True)]
+                    for s in range(len(lens[ps[0]]))
+                ]
+                for ps in groups.values()
             ]
-            for ps in groups.values()
-        ]
+
+        preds_all = _group(preds_all, preds_lens, 1)
+        preds_coords_all = _group(preds_coords_all, preds_lens, 0)
+        preds_times_all = _group(preds_times_all, preds_lens, 0)
+        targets_all = _group(targets_all, targets_lens, 0)
+        targets_coords_all = _group(targets_coords_all, targets_lens, 0)
+        targets_times_all = _group(targets_times_all, targets_lens, 0)
+        targets_lens = _group_lens(targets_lens)
+        preds_lens = _group_lens(preds_lens)
         timestep_idxs = list(groups)
 
     # collect source information
@@ -248,6 +290,9 @@ def write_output(
         sample_start,
         forecast_offset,
         timestep_idxs,
+        preds_coords=preds_coords_all,
+        preds_times=preds_times_all,
+        preds_lens=preds_lens,
     )
     with zarrio_writer(config.get_path_results(cf, mini_epoch)) as zio:
         for subset in data.items():
