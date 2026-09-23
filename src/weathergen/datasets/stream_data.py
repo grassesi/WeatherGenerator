@@ -93,6 +93,9 @@ class StreamData:
         self.target_coords = [torch.tensor([]) for _ in range(output_steps)]
         self.target_coords_raw = [[] for _ in range(output_steps)]
         self.target_times_raw = [np.array([], dtype="datetime64[ns]") for _ in range(output_steps)]
+        # [N, C] per step, False where a masked prediction channel has no valid target; empty
+        # when the stream masks no channel
+        self.target_valid = [torch.zeros((0, 0), dtype=torch.bool) for _ in range(output_steps)]
         # this is not directly used but to precompute index in compute_idxs_predict()
         self.target_coords_lens = [
             torch.tensor([0 for _ in range(self.healpix_cells)]) for _ in range(output_steps)
@@ -122,6 +125,7 @@ class StreamData:
         self.target_tokens = _pin_tensor_list(self.target_tokens)
         self.idxs_inv = _pin_tensor_list(self.idxs_inv)
         self.target_coords_raw = _pin_tensor_list(self.target_coords_raw)
+        self.target_valid = _pin_tensor_list(self.target_valid)
 
         # Pin source tensors
         self.source_tokens_cells = _pin_tensor_list(self.source_tokens_cells)
@@ -148,6 +152,7 @@ class StreamData:
         self.target_coords = [t.to(dv, non_blocking=True) for t in self.target_coords]
         self.target_coords_lens = [t.to(dv, non_blocking=True) for t in self.target_coords_lens]
         self.target_tokens = [t.to(dv, non_blocking=True) for t in self.target_tokens]
+        self.target_valid = [t.to(dv, non_blocking=True) for t in self.target_valid]
 
         # move to device if source data is present
         if not np.array([s is None for s in self.source_tokens_cells]).all():
@@ -299,6 +304,9 @@ class StreamData:
         target_coords: torch.Tensor,
         target_coords_per_cell: torch.Tensor,
         is_spoof: bool,
+        target_coords_raw=None,
+        times_raw=None,
+        target_valid=None,
     ) -> None:
         """
         Add data for target for one input.
@@ -320,6 +328,9 @@ class StreamData:
               absolute target times
         idxs_inv:
             Indices to reorder targets back to order in input
+        target_valid : torch.tensor( num points, channels ), bool
+            False where a masked prediction channel is NaN in the target window, rows in
+            prediction order; empty when the stream masks no channel
 
         Returns
         -------
@@ -328,6 +339,12 @@ class StreamData:
 
         self.target_coords[fstep] = target_coords
         self.target_coords_lens[fstep] = target_coords_per_cell
+        if target_coords_raw is not None:
+            self.target_coords_raw[fstep] = target_coords_raw
+        if times_raw is not None:
+            self.target_times_raw[fstep] = times_raw
+        if target_valid is not None:
+            self.target_valid[fstep] = target_valid
 
         self.target_is_spoof[fstep] = is_spoof
 

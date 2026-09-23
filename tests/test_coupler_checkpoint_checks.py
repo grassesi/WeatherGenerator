@@ -88,11 +88,15 @@ def model(num_blocks: int, std: float = 0.3):
     return types.SimpleNamespace(forcing_engine=engine(num_blocks, std))
 
 
-def component_config(cadence: np.timedelta64, ffe_num_blocks: int = 1):
+def component_config(
+    cadence: np.timedelta64, ffe_num_blocks: int = 1, mask: list[str] | None = None
+):
     hours = int(cadence / np.timedelta64(1, "h"))
+    stream_cfg = {} if mask is None else {"mask_predictions": mask}
     return OmegaConf.create(
         {
             "ffe_num_blocks": ffe_num_blocks,
+            "streams": {STREAM: stream_cfg},
             "healpix_level": 5,
             "training_config": {
                 "time_window_step": f"{hours}h",
@@ -117,6 +121,8 @@ def coupler(
     consumer_blocks: int = 1,
     consumer_ffe_std: float = 0.3,
     wrappers: tuple[type, ...] = (),
+    producer_mask: list[str] | None = None,
+    producer_nan_channels: frozenset[str] | None = None,
 ) -> Coupler:
     """A two-component Coupler wired past setup(), with the state the checks read.
 
@@ -125,6 +131,7 @@ def coupler(
     that they do read.
     """
     producer_reader = PlainReader(producer_cadence, producer_files or ["ocean.zarr"])
+    producer_reader.nan_channels = producer_nan_channels
     consumer_reader = PlainReader(consumer_period, consumer_files or ["ocean.zarr"])
 
     stack = consumer_reader
@@ -135,7 +142,7 @@ def coupler(
         {
             "Ocean": (
                 trainer("Ocean", producer_reader, 1),
-                component_config(producer_cadence),
+                component_config(producer_cadence, mask=producer_mask),
             ),
             "Atmo": (
                 trainer("Atmo", consumer_reader, consumer_blocks, consumer_ffe_std),
@@ -270,6 +277,46 @@ def test_token_size_and_healpix_level_are_not_compared():
     coup._components["Atmo"][1].training_config.token_size = 16
 
     coup._check_exchange_grid()
+
+
+# ---------------------------------------------------------------- the exchanged NaN mask
+
+
+def test_an_exchanged_nan_channel_left_unmasked_is_refused():
+    """Chunk 0 hands over NaN land from disk; every later chunk would hand over fiction."""
+    coup = coupler(producer_nan_channels=frozenset({"sst"}))
+
+    with pytest.raises(ValueError, match="does not mask them") as err:
+        coup._check_exchange_masks()
+
+    assert "--options 'Ocean:streams.ERA5-Ocean.mask_predictions=[sst]'" in str(err.value)
+
+
+def test_a_masked_nan_channel_passes(caplog):
+    coup = coupler(producer_nan_channels=frozenset({"sst"}), producer_mask=["sst"])
+
+    with caplog.at_level(logging.INFO, logger="weathergen.common.coupling"):
+        coup._check_exchange_masks()
+
+    assert any("masked ['sst']" in r.message for r in caplog.records)
+
+
+def test_a_channel_without_nans_needs_no_mask():
+    coup = coupler(producer_nan_channels=frozenset({"ci"}))
+
+    coup._check_exchange_masks()
+
+
+def test_unknown_nan_channels_warn_instead_of_refusing(caplog):
+    """A reader that cannot say which channels carry NaNs leaves the check unable to run."""
+    coup = coupler(producer_nan_channels=None)
+
+    with caplog.at_level(logging.WARNING, logger="weathergen.common.coupling"):
+        coup._check_exchange_masks()
+
+    assert any(
+        r.levelno == logging.WARNING and "was not checked" in r.message for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------- C3: provenance

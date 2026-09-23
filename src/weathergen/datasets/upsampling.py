@@ -89,6 +89,7 @@ class UpsamplingReader(DataReaderTimestep, WrappedDataReader):
         self.target_idx = wrapped_reader.target_idx
         self.geoinfo_idx = wrapped_reader.geoinfo_idx
         self.target_channel_weights = wrapped_reader.target_channel_weights
+        self.nan_channels = wrapped_reader.nan_channels
 
         self.mean = wrapped_reader.mean
         self.stdev = wrapped_reader.stdev

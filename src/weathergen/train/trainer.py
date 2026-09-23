@@ -792,6 +792,10 @@ class Trainer(TrainerBase):
 
                     batch.to_device(self.device)
 
+                    # `inference_only` pertains to the active mode (test/inference).
+                    # Use the passed `mode_cfg` so validation/training respect their own setting.
+                    inference_only = mode_cfg.get("inference_only", False)
+
                     # evaluate model
                     with torch.autocast(
                         device_type=f"cuda:{cf.local_rank}",
@@ -799,14 +803,22 @@ class Trainer(TrainerBase):
                         enabled=cf.with_mixed_precision,
                     ):
                         targets_and_auxs = {}
+                        # Compute targets/aux once per loss; pass source samples when
+                        # running in inference-only mode, otherwise pass real targets.
                         for loss_name, target_aux in self.target_and_aux_calculators_val.items():
                             target_idxs = get_target_idxs_from_cfg(mode_cfg, loss_name)
-                            targets_and_auxs[loss_name] = target_aux.compute(
+                            samples = (
+                                batch.get_source_samples()
+                                if inference_only
+                                else batch.get_target_samples(target_idxs)
+                            )
+                            tao = target_aux.compute(
                                 self.cf.general.istep,
-                                batch.get_target_samples(target_idxs),
+                                samples,
                                 self.model_params,
                                 self.model,
                             )
+                            targets_and_auxs[loss_name] = tao
 
                         preds = self._process_validation_chunks(
                             batch,
@@ -817,7 +829,7 @@ class Trainer(TrainerBase):
                             targets_and_auxs,
                         )
 
-                    if preds is not None:
+                    if preds is not None and not inference_only:
                         _ = self.loss_calculator_val.compute_loss(
                             preds=preds,
                             targets_and_aux=targets_and_auxs,
@@ -829,16 +841,22 @@ class Trainer(TrainerBase):
                     if (bidx * batch_size) > mode_cfg.samples_per_mini_epoch:
                         break
 
-        self.finish_validation(mini_epoch)
+        self.finish_validation(mini_epoch, inference_only=mode_cfg.get("inference_only", False))
 
-    def finish_validation(self, mini_epoch: int) -> None:
+    def finish_validation(self, mini_epoch: int, inference_only: bool = False) -> None:
         """Log this model's accumulated validation metrics and advance its sampler.
 
         Split out so a driver interleaving several models can call it per component,
-        in a fixed order - the loggers issue DDP collectives.
+        in a fixed order - the loggers issue DDP collectives. With inference_only there is
+        no loss, so nothing is logged.
         """
-        self._log_terminal(0, mini_epoch, VAL)
-        self._log(VAL)
+        if not inference_only:
+            self._log_terminal(0, mini_epoch, VAL)
+            self._log(VAL)
+        else:
+            logger.info(
+                f"inference_only=True: skipping loss/metric logging for epoch {mini_epoch}."
+            )
 
         # avoid that there is a systematic bias in the validation subset
         self.dataset_val.advance()

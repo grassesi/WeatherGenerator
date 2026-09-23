@@ -49,6 +49,7 @@ class AveragingReader(DataReaderTimestep, WrappedDataReader):
         self.target_idx = self._wrapped_reader.target_idx
         self.geoinfo_idx = self._wrapped_reader.geoinfo_idx
         self.target_channel_weights = self._wrapped_reader.target_channel_weights
+        self.nan_channels = self._wrapped_reader.nan_channels
 
         self.mean = self._wrapped_reader.mean
         self.stdev = self._wrapped_reader.stdev

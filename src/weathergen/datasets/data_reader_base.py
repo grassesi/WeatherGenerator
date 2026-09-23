@@ -420,6 +420,8 @@ class DataReaderBase(metaclass=ABCMeta):
     target_idx: list[int] = abstract_attribute()
     geoinfo_idx: list[int] = abstract_attribute()
     target_channel_weights: list[float] = abstract_attribute()
+    # Channels the dataset declares may hold NaN; None when the reader cannot tell.
+    nan_channels: frozenset[str] | None = None
 
     def __init__(
         self,
