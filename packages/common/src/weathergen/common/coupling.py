@@ -425,6 +425,7 @@ class Coupler:
         self._announce_couplings()
         self._check_forcing_engines()
         self._check_exchange_grid()
+        self._check_exchange_masks()
         self._report_checkpoint_provenance(checkpoints)
 
     def _step_order(self) -> list[str]:
@@ -622,6 +623,14 @@ class Coupler:
             raise ValueError(msg)
 
         rollout = self._rollout
+        if rollout.accumulate_chunks:
+            msg = (
+                "rollout.accumulate_chunks is true, but a coupled rollout always runs "
+                "test_config.inference_only, which builds no targets: there is nothing to score "
+                "the assembled chunks against. Remove accumulate_chunks from the couplings file."
+            )
+            raise ValueError(msg)
+
         for name in self._names:
             _, ccf = self._components[name]
             # the effective test config, resolved the same way Trainer.init will resolve it
@@ -663,6 +672,9 @@ class Coupler:
                 # otherwise substitutes the next usable window for an empty or NaN one, and
                 # does so per component, which walks two components onto different dates.
                 "strict_batches": True,
+                # a coupled rollout is judged on the arrays it writes, and a rollout past the
+                # data end has no targets for its later chunks, so the target half is not built
+                "inference_only": True,
                 "forecast": {
                     "offset": rollout.forecast_offset,
                     "chunk_size": fsteps_per_chunk,
@@ -766,6 +778,12 @@ class Coupler:
             logger.warning(
                 f"Component {name!r}: test_config.forecast.policy was {policy!r}, forced to "
                 "'fixed'. Rank-dependent step counts deadlock the FSDP collectives."
+            )
+
+        if not test_cfg.get("inference_only", True):
+            logger.warning(
+                f"Component {name!r}: test_config.inference_only was False, forced to True. A "
+                "coupled rollout builds no targets and computes no loss."
             )
 
         num_steps = test_cfg.get("forecast", {}).get("num_steps")
@@ -1037,6 +1055,62 @@ class Coupler:
                     + (f" ({bridges} also in the stack)." if bridges else ".")
                 )
 
+    def _check_exchange_masks(self) -> None:
+        """An exchanged channel that is NaN on disk must be masked in the producer's prediction.
+
+        `_prime` hands the consumer the producer's ground truth for chunk 0, NaN wherever the
+        data is (SST over land), and the consumer's tokenizer turns that NaN into the same
+        `mask_value` it saw in training. Every later chunk is a prediction, finite everywhere
+        unless the producer masks it via `streams.<stream>.mask_predictions`. Unmasked, the
+        consumer is forced from chunk 1 on by land values it never saw, with nothing to show
+        for it (`optional_target_sst_masking.md` C, M3).
+
+        The producer's disk reader knows which channels carry NaNs (`nan_channels`); None
+        means it cannot say, and then the check abstains rather than guesses.
+        """
+
+        for coupling in self._live_couplings():
+            producer, consumer, stream = coupling.producer, coupling.consumer, coupling.stream
+            where = f"Coupling {coupling.name!r} ({producer!r} -> {consumer!r}, '{stream}')"
+
+            # what crosses is what the coupling reader maps: the consumer's source channels,
+            # taken by name from the producer's target channels
+            producer_reader = self._producer_reader(producer, stream)
+            consumer_readers = self._pristine_forcings[consumer].forcing_streams[stream]
+            needed = set(_reader_stack(consumer_readers[0])[-1].source_channels)
+            exchanged = [ch for ch in producer_reader.target_channels if ch in needed]
+
+            stream_cfg = self.config(producer).streams[stream]
+            mask = list(stream_cfg.get("mask_predictions", None) or [])
+
+            readers = self.trainer(producer).dataset.streams_datasets[stream].readers
+            nans = [getattr(_reader_stack(r)[-1], "nan_channels", None) for r in readers]
+            if any(nan is None for nan in nans):
+                logger.warning(
+                    f"{where}: {producer!r}'s reader cannot say which channels carry NaNs, so "
+                    f"whether the exchanged channels {exchanged} need masking was not checked. "
+                    f"Masked: {[ch for ch in exchanged if ch in mask]}."
+                )
+                continue
+
+            nan = frozenset().union(*nans)
+            unmasked = [ch for ch in exchanged if ch in nan and ch not in mask]
+            if unmasked:
+                msg = (
+                    f"{where}: {producer!r} hands over {unmasked}, which are NaN on disk, but "
+                    f"its stream config does not mask them (mask_predictions={mask}). Chunk 0 "
+                    f"reaches {consumer!r} with NaN there and every later chunk with finite "
+                    "predictions the consumer never trained on. Pass "
+                    f"--options '{producer}:streams.{stream}.mask_predictions="
+                    f"[{','.join(sorted(set(mask) | set(unmasked)))}]'."
+                )
+                raise ValueError(msg)
+
+            logger.info(
+                f"{where}: exchanged channels {exchanged}, masked "
+                f"{[ch for ch in exchanged if ch in mask]}, NaN on disk {sorted(nan)}."
+            )
+
     # ------------------------------------------------------------------ driving
 
     def validate(self, mini_epoch: int = 0) -> None:
@@ -1066,7 +1140,10 @@ class Coupler:
         self._report_provenance()
 
         for name in self._names:
-            self.trainer(name).finish_validation(mini_epoch)
+            trainer = self.trainer(name)
+            trainer.finish_validation(
+                mini_epoch, inference_only=trainer.test_cfg.get("inference_only", False)
+            )
 
     def _report_provenance(self) -> None:
         """Say where every forcing window a run served actually came from.
@@ -1118,12 +1195,19 @@ class Coupler:
 
     @staticmethod
     def _compute_targets(trainer: Trainer, batch) -> dict:
+        # Trainer.validate's rule: under inference_only there is no target half, and the
+        # prediction geometry the writer needs sits on the source samples
+        inference_only = trainer.test_cfg.get("inference_only", False)
         targets_and_auxs = {}
         for loss_name, target_aux in trainer.target_and_aux_calculators_val.items():
             target_idxs = get_target_idxs_from_cfg(trainer.test_cfg, loss_name)
             targets_and_auxs[loss_name] = target_aux.compute(
                 trainer.cf.general.istep,
-                batch.get_target_samples(target_idxs),
+                (
+                    batch.get_source_samples()
+                    if inference_only
+                    else batch.get_target_samples(target_idxs)
+                ),
                 trainer.model_params,
                 trainer.model,
             )
@@ -1188,10 +1272,11 @@ class Coupler:
         # losses outside autocast, matching the single-model path
         for name in self._names:
             plan = plans[name]
-            if not plan.should_accumulate_chunks:
+            trainer = self.trainer(name)
+            # inference_only builds no targets, so there is nothing to score against
+            if not plan.should_accumulate_chunks or trainer.test_cfg.get("inference_only", False):
                 continue
 
-            trainer = self.trainer(name)
             physical, latent = accumulated[name]
             preds = trainer.assemble_chunks(plan, physical, latent, batches[name])
             _ = trainer.loss_calculator_val.compute_loss(

@@ -194,11 +194,17 @@ def build_chunk(
     coords: NDArray[np.float32],
     fsteps: list[int] = FSTEPS,
     channels: int = 2,
+    decoy_target_half: bool = False,
 ) -> tuple[ModelOutput, ModelBatch]:
     """One rollout chunk on the producer's timeline, valid from `init`.
 
     The tile carries the producer's handler, which is what stamps a prediction: a chunk that
     travels without one leaves the consumer guessing which timeline its steps are indices on.
+
+    All geometry sits on the source half, as `add_target_coords` leaves it; under
+    `inference_only`, which a coupled run always sets, there is no target half at all.
+    `decoy_target_half` adds one anyway, with the pre-branch layout (raw coords, times and a
+    reversing `idxs_inv`) but different points and times, so reading any of it is visible.
     """
 
     base = idx_of(producer_handler, init)
@@ -206,23 +212,28 @@ def build_chunk(
 
     batch = ModelBatch([STREAM], 1, 1, FORECAST_OFFSET, fsteps[-1] + 1)
     source = StreamData(base, 1, fsteps[-1] + 1, healpix_cells=48)
-    target = StreamData(base, 1, fsteps[-1] + 1, healpix_cells=48)
     for fstep in fsteps:
-        # the two halves of the geometry live on different samples: add_target_values writes
-        # the raw coords, times and idxs_inv, add_target_coords the tokenized target coords
-        target.target_coords_raw[fstep] = torch.tensor(coords)
+        # add_target_coords writes the tokenized coords and, with the branch, the raw coords
+        # and times, all in prediction row order
+        source.target_coords[fstep] = _target_tokens(GEOINFOS)
+        source.target_coords_raw[fstep] = coords.copy()
         # stamped at the time the step is valid for, which is what the reader serves it in
-        target.target_times_raw[fstep] = np.full(
+        source.target_times_raw[fstep] = np.full(
             N_POINTS, init + fstep * step, dtype="datetime64[ns]"
         )
-        # a non-trivial permutation, so applying it is observable
-        target.idxs_inv[fstep] = torch.arange(N_POINTS - 1, -1, -1)
-        target.target_is_spoof[fstep] = False
-        source.target_coords[fstep] = _target_tokens(GEOINFOS)
         source.target_is_spoof[fstep] = False
-
     batch.add_source_stream(0, 0, STREAM, source, SampleMetaData(params={}, mask=None))
-    batch.add_target_stream(0, 0, STREAM, target, SampleMetaData(params={}, mask=None))
+
+    if decoy_target_half:
+        target = StreamData(base, 1, fsteps[-1] + 1, healpix_cells=48)
+        for fstep in fsteps:
+            target.target_coords_raw[fstep] = torch.tensor(coords + 1.0)
+            target.target_times_raw[fstep] = np.full(
+                N_POINTS, init - H24 * 100, dtype="datetime64[ns]"
+            )
+            target.idxs_inv[fstep] = torch.arange(N_POINTS - 1, -1, -1)
+            target.target_is_spoof[fstep] = False
+        batch.add_target_stream(0, 0, STREAM, target, SampleMetaData(params={}, mask=None))
 
     tile = ChunkInfo.tiles(fsteps, len(fsteps), producer_handler, 1)[0]
     output = ModelOutput(tile, batch.get_source_samples())
@@ -673,8 +684,8 @@ def test_prediction_is_served_at_its_valid_time(consumer, consumer_handler, prod
         # handed out in physical space, so the consumer can normalize it as usual
         expected = np.float32(fstep) * consumer.stdev[:2] + consumer.mean[:2]
         assert np.allclose(rdata.data[0], expected)
-        # idxs_inv was applied to coordinates and data alike
-        assert np.allclose(rdata.coords[0], coords[-1])
+        # served in prediction row order; nothing reorders it
+        assert np.allclose(rdata.coords, coords)
 
 
 def test_normalization_round_trip(consumer, consumer_handler, producer, coords):
@@ -694,10 +705,10 @@ def test_normalization_round_trip(consumer, consumer_handler, producer, coords):
 
         assert np.allclose(rdata.data, float(fstep))
         # geoinfos are the producer's own, recovered from its target tokens and denormalized
-        # on the way out, so normalizing again returns the values the tokenizer stored --
-        # reordered by idxs_inv alongside the data. Never zero: that was the defect this
-        # replaces, where the consumer's climatological mean stood in for them.
-        assert np.allclose(rdata.geoinfos[:, 0], GEOINFOS[::-1])
+        # on the way out, so normalizing again returns the values the tokenizer stored. Never
+        # zero: that was the defect this replaces, where the consumer's climatological mean
+        # stood in for them.
+        assert np.allclose(rdata.geoinfos[:, 0], GEOINFOS)
 
 
 def test_stored_windows_survive_in_place_normalization(
@@ -732,11 +743,92 @@ def test_spoofed_producer_steps_abort_the_coupling(consumer, producer, coords):
     output, batch = build_chunk(
         producer.time_window_handler, np.datetime64("2023-01-02T00:00"), coords
     )
-    batch.get_target_sample(0).streams_data[STREAM].target_is_spoof[FSTEPS[0]] = True
+    batch.get_source_sample(0).streams_data[STREAM].target_is_spoof[FSTEPS[0]] = True
 
     reader = DataReaderCoupling(consumer, STREAM, producer=producer)
     with pytest.raises(ValueError, match="Cannot pair prediction with its target geometry"):
         reader.add_chunk(output, batch)
+
+
+def test_geometry_is_read_off_the_source_sample(consumer, consumer_handler, producer, coords):
+    """Coords and times come from the source half, never from a target half that is present.
+
+    The decoy target half carries other points, a stamp 100 days early and a reversing
+    idxs_inv, so reading any of it, or reordering by it, changes what is served.
+    """
+    init = np.datetime64("2023-01-02T00:00")
+    reader = DataReaderCoupling(
+        consumer,
+        STREAM,
+        producer=producer,
+        request_handler=shifted(consumer_handler, H24),
+        init_time=init,
+    )
+    reader.add_chunk(
+        *build_chunk(producer.time_window_handler, init, coords, decoy_target_half=True)
+    )
+
+    for fstep in FSTEPS:
+        valid = init + fstep * H24
+        rdata = reader.get_source(idx_of(consumer_handler, valid + H24))
+
+        assert np.allclose(rdata.coords, coords)
+        assert served_times(rdata) == [np.datetime64(valid, "m")]
+        assert np.allclose(rdata.geoinfos[:, 0], GEOINFOS * 0.25 + 0.5)
+
+
+def test_a_batch_without_a_target_half_is_lowered(consumer, consumer_handler, producer, coords):
+    """Under inference_only the target sample holds nothing for the stream."""
+    init = np.datetime64("2023-01-02T00:00")
+    output, batch = build_chunk(producer.time_window_handler, init, coords)
+    assert batch.get_target_sample(0).streams_data[STREAM] is None
+
+    reader = DataReaderCoupling(
+        consumer,
+        STREAM,
+        producer=producer,
+        request_handler=shifted(consumer_handler, H24),
+        init_time=init,
+    )
+    reader.add_chunk(output, batch)
+
+    rdata = reader.get_source(idx_of(consumer_handler, init + FSTEPS[0] * H24 + H24))
+    assert rdata.data.shape == (N_POINTS, 2)
+
+
+def test_a_masked_prediction_reaches_the_consumer_as_nan(
+    consumer, consumer_handler, producer, coords
+):
+    """A NaN the producer wrote (SST over land) must survive denormalization and the store.
+
+    That NaN is what `_prime` hands over for chunk 0 from disk, and what the consumer's
+    tokenizer turns into the mask value it trained on. Filled in anywhere on the way, the
+    consumer would be forced by a land value from chunk 1 on.
+    """
+    init = np.datetime64("2023-01-02T00:00")
+    output, batch = build_chunk(producer.time_window_handler, init, coords)
+    land = [1, 4]
+    for fstep in FSTEPS:
+        pred = torch.full((1, N_POINTS, 2), float(fstep), dtype=torch.float32)
+        pred[:, land, 0] = float("nan")
+        output.physical[output.chunk_idx(fstep)][STREAM] = [pred]
+
+    reader = DataReaderCoupling(
+        consumer,
+        STREAM,
+        producer=producer,
+        request_handler=shifted(consumer_handler, H24),
+        init_time=init,
+    )
+    reader.add_chunk(output, batch)
+
+    for fstep in FSTEPS:
+        rdata = reader.get_source(idx_of(consumer_handler, init + fstep * H24 + H24))
+        nan = np.isnan(rdata.data)
+        assert nan[land, 0].all()
+        # only the masked points of the masked channel, nothing else
+        assert nan.sum() == len(land)
+        assert np.allclose(rdata.data[~nan[:, 0], 0], fstep * consumer.stdev[0] + consumer.mean[0])
 
 
 def _producer_with_wider_target(twh) -> StampedReader:

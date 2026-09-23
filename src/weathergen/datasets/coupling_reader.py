@@ -391,10 +391,9 @@ class DataReaderCoupling(DataReaderTimestep):
         assert geoinfos.shape == expected, (
             f"Coupled stream '{self._producer_stream}': sliced geoinfos of shape "
             f"{geoinfos.shape} at forecast step {fstep}, expected {expected}. Rows come from "
-            "the source sample's tokenized target coords and points from the target sample's "
-            "raw ones, so a row mismatch means the two no longer describe the same points; a "
-            "column mismatch means get_target_coords_local's layout moved away from "
-            "TIMES_WIDTH."
+            "the source sample's tokenized target coords and points from its raw ones, so a "
+            "row mismatch means the two no longer describe the same points; a column mismatch "
+            "means get_target_coords_local's layout moved away from TIMES_WIDTH."
         )
 
         # take the consumer's subset, then back to physical space; the consumer normalizes
@@ -612,8 +611,8 @@ class DataReaderCoupling(DataReaderTimestep):
         """Index the predictions of one rollout chunk by the time they are valid for.
 
         `batch` is needed because a ModelOutput carries only the predicted values: the
-        coordinates, times and geoinfos they live on sit on the batch's samples, split
-        across the source and target halves as `_lower_prediction` describes.
+        coordinates, times and geoinfos they live on sit on the batch's source samples, as
+        `_lower_prediction` describes.
 
         The chunk is built locally and assigned once, so `get_source` never reads out of a
         chunk that is still being emitted (G4).
@@ -671,39 +670,30 @@ class DataReaderCoupling(DataReaderTimestep):
         batch: ModelBatch,
         tile: ChunkInfo | None = None,
     ) -> tuple[NPDT64, ReaderData]:
-        """Pair one prediction with its target geometry and bring it to physical space.
+        """Pair one prediction with its geometry and bring it to physical space.
 
-        The geometry is split across two samples, so both are needed. `target_coords_raw`,
-        `target_times_raw` and `idxs_inv` are written only by `add_target_values`, which runs
-        under `target_select`; the tokenized `target_coords` the geoinfos are recovered from
-        is written only by `add_target_coords`, which runs under `source_select`
-        (`multi_stream_data_sampler.py:694-697`). Neither sample carries both halves -- the
-        other half is left at its empty `StreamData.__init__` default, so reading it off the
-        wrong sample yields nothing rather than raising.
+        Everything is read off the *source* sample. `add_target_coords` runs under
+        `source_select` and stores, per forecast step, the tokenized `target_coords` the
+        geoinfos are recovered from and the raw `target_coords_raw` / `target_times_raw` the
+        model was queried at, all in prediction row order. The target half is not needed and,
+        under `inference_only` (which a coupled run always sets), does not exist.
 
-        Zipping the two rests on their rows describing the same points in the same order,
-        which holds because both are tokenized from the same windows under the same target
-        mask. Nothing states that invariant, so the row count is checked below.
+        No `idxs_inv` reordering: the consumer re-tokenizes what it receives, so row order is
+        irrelevant, and the source-half rows already line up with the prediction rows. That
+        alignment is still what the row-count assert below guards. NaN in the prediction (a
+        masked channel, e.g. SST over land) passes through denormalization untouched.
         """
 
-        i_target = batch.get_target_idx_for_source(i_source)
-        stream_data = batch.get_target_sample(i_target).streams_data.get(self._producer_stream)
+        source_data = batch.get_source_sample(i_source).streams_data.get(self._producer_stream)
         if (
-            stream_data is None
-            or stream_data.is_spoof(fstep)
-            or len(stream_data.target_coords_raw[fstep]) == 0
+            source_data is None
+            or source_data.is_spoof(fstep)
+            or len(source_data.target_coords_raw[fstep]) == 0
         ):
             raise ValueError("Cannot pair prediction with its target geometry")
 
-        source_data = batch.get_source_sample(i_source).streams_data.get(self._producer_stream)
-        if source_data is None:
-            raise ValueError(
-                f"Coupled stream '{self._producer_stream}' has no source sample {i_source}, so "
-                "the geoinfos its prediction carries cannot be recovered."
-            )
-
-        coords = _to_numpy(stream_data.target_coords_raw[fstep])
-        times = np.asarray(stream_data.target_times_raw[fstep])
+        coords = _to_numpy(source_data.target_coords_raw[fstep])
+        times = np.asarray(source_data.target_times_raw[fstep])
         geoinfos = self._slice_geoinfos(source_data, fstep, len(coords))
 
         # ensemble members are equivalent forcings, use their mean
@@ -714,21 +704,14 @@ class DataReaderCoupling(DataReaderTimestep):
             f"but {coords.shape[0]} coordinates and {times.shape[0]} times."
         )
 
-        # restore the ordering of the original data, as the output writer does
-        idxs_inv = stream_data.idxs_inv[fstep]
-        if len(idxs_inv) > 0:
-            idxs_inv = _to_numpy(idxs_inv)
-            data, coords, times = data[idxs_inv], coords[idxs_inv], times[idxs_inv]
-            geoinfos = geoinfos[idxs_inv]
-
         # select the channels the consumer expects and denormalize them
         data = data[:, self._pred_cols] * self._pred_stdev + self._pred_mean
 
         if tile is not None:
-            valid_idx = tile.window_idx(stream_data.sample_idx, fstep)
+            valid_idx = tile.window_idx(source_data.sample_idx, fstep)
             valid_time = tile.time_window_handler.window(valid_idx).start
         else:
-            valid_idx = stream_data.sample_idx + fstep * self._stride
+            valid_idx = source_data.sample_idx + fstep * self._stride
             valid_time = self._source_handler.window(valid_idx).start
 
         return valid_time, ReaderData(

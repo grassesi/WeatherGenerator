@@ -147,8 +147,9 @@ class FakeTrainer:
     def assemble_chunks(self, plan, physical, latent, batch):
         return FakeOutput("+".join(physical))
 
-    def finish_validation(self, mini_epoch):
+    def finish_validation(self, mini_epoch, inference_only=False):
         self.finished = True
+        self.finished_inference_only = inference_only
 
 
 @pytest.fixture
@@ -278,6 +279,63 @@ def test_accumulation_preserves_chunk_order(no_autocast, monkeypatch):
     assert assembled == [["A0", "A1", "A2"]]
 
 
+def test_no_loss_is_computed_under_inference_only(no_autocast):
+    """inference_only builds no target half; scoring against it must not even be attempted."""
+    a = FakeTrainer("A", 3, accumulate=True)
+    a.test_cfg.inference_only = True
+    a.assemble_chunks = lambda *args: pytest.fail("assembled chunks under inference_only")
+
+    make_coupler({"A": a})._run_batch({"A": FakeBatch([0])}, bidx=0, mini_epoch=0)
+
+    assert a.steps == [0, 1, 2]
+
+
+class TargetAux:
+    """Records which samples the target/aux computation was handed."""
+
+    def __init__(self):
+        self.seen = []
+
+    def compute(self, istep, samples, model_params, model):
+        self.seen.append(samples)
+        return samples
+
+
+class HalvesBatch:
+    def get_source_samples(self):
+        return "source"
+
+    def get_target_samples(self, idxs):
+        return "target"
+
+
+@pytest.mark.parametrize(("inference_only", "half"), [(True, "source"), (False, "target")])
+def test_targets_are_computed_on_the_half_that_exists(monkeypatch, inference_only, half):
+    """Trainer.validate's rule: under inference_only only the source half is built."""
+    monkeypatch.setattr(
+        "weathergen.common.coupling.get_target_idxs_from_cfg", lambda cfg, name: [0]
+    )
+    trainer = FakeTrainer("A", 1)
+    trainer.test_cfg.inference_only = inference_only
+    trainer.model_params = None
+    aux = TargetAux()
+    trainer.target_and_aux_calculators_val = {"physical": aux}
+
+    Coupler._compute_targets(trainer, HalvesBatch())
+
+    assert aux.seen == [half]
+
+
+def test_finish_validation_is_told_about_inference_only(no_autocast):
+    """Its loggers would otherwise report a loss that was never computed."""
+    a = FakeTrainer("A", 1)
+    a.test_cfg.inference_only = True
+
+    make_coupler({"A": a}).validate()
+
+    assert a.finished and a.finished_inference_only is True
+
+
 def test_components_are_driven_in_sorted_order(no_autocast):
     """Collective order must not depend on dict insertion order."""
     coupler = make_coupler({"Ocean": FakeTrainer("Ocean", 1), "Atmo": FakeTrainer("Atmo", 1)})
@@ -373,15 +431,35 @@ def test_batch_size_is_forced_to_one():
         assert cfg.model_input.forecasting.num_samples == 1
 
 
-def test_accumulate_chunks_is_off_unless_the_rollout_asks_for_it():
-    """Retaining every chunk's state is what chunking exists to avoid, so it is opt-in."""
+def test_accumulate_chunks_is_off():
+    """Retaining every chunk's state is what chunking exists to avoid."""
     off = derive(atmo_ocean_cfs(), ATMO_OCEAN)
     for cfg in off.values():
         assert cfg.forecast.accumulate_chunks is False
 
-    on = derive(atmo_ocean_cfs(), ATMO_OCEAN, make_rollout(accumulate_chunks=True))
-    for cfg in on.values():
-        assert cfg.forecast.accumulate_chunks is True
+
+def test_accumulate_chunks_is_rejected_at_setup():
+    """A coupled run is inference_only, so the assembled chunks have nothing to be scored on."""
+    with pytest.raises(ValueError, match="accumulate_chunks is true"):
+        derive(atmo_ocean_cfs(), ATMO_OCEAN, make_rollout(accumulate_chunks=True))
+
+
+def test_inference_only_is_forced_on():
+    out = derive(atmo_ocean_cfs(), ATMO_OCEAN)
+
+    assert all(cfg.inference_only is True for cfg in out.values())
+
+
+def test_inference_only_false_is_overridden_with_a_warning(caplog):
+    cfs = atmo_ocean_cfs()
+    cfs["Ocean"].test_config = {"inference_only": False}
+
+    with caplog.at_level(logging.WARNING):
+        out = derive(cfs, ATMO_OCEAN)
+
+    assert out["Ocean"].inference_only is True
+    warned = [r.message for r in caplog.records if "inference_only" in r.message]
+    assert len(warned) == 1 and "'Ocean'" in warned[0]
 
 
 def test_num_workers_is_zero_unless_the_rollout_asks_for_more():
