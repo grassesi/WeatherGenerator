@@ -29,6 +29,8 @@ import weathergen.common.config as config
 from weathergen.datasets.data_reader_base import TimeWindowHandler
 from weathergen.model.chunking import ChunkInfo
 from weathergen.train.coupling import Coupler, Coupling, ModelCheckpoint, Rollout
+from weathergen.train.coupling.derivation import derive_component_configs
+from weathergen.train.coupling.spec import produced_streams
 from weathergen.train.trainer import ChunkPlan, Trainer
 from weathergen.train.utils import resolve_stage_configs
 
@@ -218,7 +220,11 @@ def derive(components, couplings=None, rollout=None):
         rollout or make_rollout(),
     )
     coupler._check_couplings()
-    coupler._derive_component_configs()
+    derive_component_configs(
+        {name: coupler.config(name) for name in coupler._names},
+        coupler._rollout,
+        coupler._couplings,
+    )
 
     return {name: resolve_stage_configs(cf)[2] for name, cf in components.items()}
 
@@ -631,7 +637,7 @@ def test_coupling_naming_an_unknown_stream_is_dropped(caplog):
     assert coupler._couplings == {}
     assert "dropped" in caplog.text
     # dropped everywhere, not just from the check: nothing is written for it either
-    assert coupler._produced_streams("Ocean") == []
+    assert produced_streams(coupler._couplings, "Ocean") == []
 
 
 # --------------------------------------------------------------------------------------

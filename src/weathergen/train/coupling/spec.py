@@ -94,3 +94,8 @@ class Rollout:
             raise ValueError(msg)
 
         return rollout
+
+
+def produced_streams(couplings: dict[str, Coupling], name: str) -> list[str]:
+    """Streams a component is the producer of, in declaration order."""
+    return [c.stream for c in couplings.values() if c.producer == name]
