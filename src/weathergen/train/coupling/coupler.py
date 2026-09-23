@@ -1,3 +1,14 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+"""The Coupler: steps the components of a coupled run chunk by chunk and exchanges fields."""
+
 from __future__ import annotations
 
 import copy
@@ -49,18 +60,12 @@ class Coupler:
     The components never step themselves. The Coupler pulls one batch per component,
     then advances every component by one chunk before any of them advances to the next,
     and writes each chunk's output as it is produced. That makes the chunk boundary the
-    single point where components meet, which is where coupling will later be inserted.
+    single point where components meet: each finished chunk is dispatched to the coupling
+    readers of every component it forces (`subscribe`, `dispatch_chunk`).
 
-    At this milestone nothing is exchanged: the components run side by side, and each
-    must reproduce exactly what it produces in a standalone inference run.
+    With no live coupling the components run side by side, and each must reproduce exactly
+    what it produces in a standalone inference run.
     """
-
-    # test-stage keys that must agree so all components walk the same sample index space
-    _SHARED_WINDOW_KEYS = ("start_date", "end_date", "time_window_len", "time_window_step")
-
-    # policies that draw the per-batch forecast step count from a rank-dependent RNG;
-    # under FSDP they make ranks issue different numbers of collectives and the run hangs
-    _RANK_UNIFORM_POLICIES = ("fixed", "sequential")
 
     def __init__(
         self,
@@ -76,7 +81,6 @@ class Coupler:
 
         # component -> the forcings the Trainer built, before any coupling substitution
         self._pristine_forcings: dict[str, ForcingInput] = {}
-        # (consumer, stream) pairs already reported, so a resubscribe stays quiet
         # (consumer, stream) pairs whose reader subscribe() actually replaced. Recorded at the
         # point of substitution, which is the only place that knows: asking the reader stack
         # afterwards means asking what type its outermost reader is, and that answer changes
@@ -391,7 +395,7 @@ class Coupler:
                 metadata=extract_batch_metadata(batches[name]),
             )
 
-    # -------------------------------------------------- coupling (not yet active)
+    # ------------------------------------------------------------------ exchange
 
     def subscribe(
         self,
@@ -415,7 +419,7 @@ class Coupler:
         }
 
         forcing_streams_coupled: dict[str, list[DataReaderBase]] = {}
-        # TODO move this loop to ForcingInput, move DataReaderCoupling into separate module.
+        # TODO move this loop to ForcingInput.
         for stream, readers in forcing_streams.items():
             coupling = coupled.get(stream)
             if coupling is not None:
