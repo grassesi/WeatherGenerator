@@ -53,6 +53,47 @@ def _merge_steps(parts, lens, axis):
     return np.concatenate(runs, axis=axis)
 
 
+def _chunk_groups(timestep_idxs, forecast_offset: int, chunk_size: int) -> dict[int, list[int]]:
+    """Map each store step to the positions in `timestep_idxs` that are merged into it.
+
+    Steps below `forecast_offset` keep their own group; the rest are grouped `chunk_size` at a
+    time, keyed `forecast_offset + chunk index`.
+    """
+    groups: dict[int, list[int]] = {}
+    for pos, t_idx in enumerate(timestep_idxs):
+        key = t_idx
+        if t_idx >= forecast_offset:
+            key = forecast_offset + (t_idx - forecast_offset) // chunk_size
+        groups.setdefault(key, []).append(pos)
+    return groups
+
+
+def _group(per_step, lens, axis, groups):
+    """Merge per-step, per-stream arrays into one entry per group, slicing by `lens`.
+
+    `lens[step][stream]` must be the per-sample row counts of `per_step[step][stream]` along
+    `axis`, i.e. the lens of that same quantity: predictions and targets can differ.
+    """
+    return [
+        [
+            _merge_steps([per_step[p][s] for p in ps], [lens[p][s] for p in ps], axis)
+            for s in range(len(per_step[ps[0]]))
+        ]
+        for ps in groups.values()
+    ]
+
+
+def _group_lens(lens, groups):
+    """Per-sample row counts of the merged groups: the sum over each group's steps."""
+    return [
+        [
+            [sum(ls) for ls in zip(*(lens[p][s] for p in ps), strict=True)]
+            for s in range(len(lens[ps[0]]))
+        ]
+        for ps in groups.values()
+    ]
+
+
 def write_output(
     cf, val_cfg, batch_size, mini_epoch, batch_idx, dn_data, batch, model_output, target_aux_out
 ):
@@ -116,12 +157,14 @@ def write_output(
                 preds_s, targets_s, t_coords_s, t_times_s = [], [], [], []
                 preds_coords_s, preds_times_s = [], []
 
-                # spoofed step: the target window lies outside the dataset, so the prediction
-                # is written in full at the fallback geometry and the target is left empty
-                is_spoof = target_aux_out.physical[t_idx][sname]["is_spoof"][0]
-                if is_spoof:
+                # spoofed sample: the target window lies outside the dataset, so the prediction
+                # is written in full at the fallback geometry and the target is left empty. The
+                # flag is per sample, since the samples of a batch have different init times.
+                spoof_flags = target_aux_out.physical[t_idx][sname]["is_spoof"]
+                if any(spoof_flags):
                     _logger.debug(
-                        f"Stream '{sname}' at t_idx={t_idx} is spoof "
+                        f"Stream '{sname}' at t_idx={t_idx} is spoof for samples "
+                        f"{[i for i, f in enumerate(spoof_flags) if f]} "
                         "(target time window is outside the dataset range); "
                         "writing model predictions with empty targets."
                     )
@@ -139,6 +182,7 @@ def write_output(
 
                 for i_batch, (pred, target) in enumerate(zip(preds, targets, strict=True)):
                     target_data = target_aux_out.physical[t_idx][sname]
+                    is_spoof = spoof_flags[i_batch]
                     t_coords = target_data["target_coords"][i_batch]
                     t_times = target_data["target_times"][i_batch]
 
@@ -190,41 +234,18 @@ def write_output(
     # chunk_size unset every step is its own group, exactly as before.
     chunk_size = val_cfg.get("forecast", {}).get("chunk_size") or 1
     if chunk_size > 1:
-        groups: dict[int, list[int]] = {}
-        for pos, t_idx in enumerate(timestep_idxs):
-            key = t_idx
-            if t_idx >= forecast_offset:
-                key = forecast_offset + (t_idx - forecast_offset) // chunk_size
-            groups.setdefault(key, []).append(pos)
+        groups = _chunk_groups(timestep_idxs, forecast_offset, chunk_size)
 
         # predictions and targets can differ in row count (a spoofed or target-less step
         # holds predictions but no target), so each is sliced by its own lens
-        def _group(per_step, lens, axis):
-            return [
-                [
-                    _merge_steps([per_step[p][s] for p in ps], [lens[p][s] for p in ps], axis)
-                    for s in range(len(per_step[ps[0]]))
-                ]
-                for ps in groups.values()
-            ]
-
-        def _group_lens(lens):
-            return [
-                [
-                    [sum(ls) for ls in zip(*(lens[p][s] for p in ps), strict=True)]
-                    for s in range(len(lens[ps[0]]))
-                ]
-                for ps in groups.values()
-            ]
-
-        preds_all = _group(preds_all, preds_lens, 1)
-        preds_coords_all = _group(preds_coords_all, preds_lens, 0)
-        preds_times_all = _group(preds_times_all, preds_lens, 0)
-        targets_all = _group(targets_all, targets_lens, 0)
-        targets_coords_all = _group(targets_coords_all, targets_lens, 0)
-        targets_times_all = _group(targets_times_all, targets_lens, 0)
-        targets_lens = _group_lens(targets_lens)
-        preds_lens = _group_lens(preds_lens)
+        preds_all = _group(preds_all, preds_lens, 1, groups)
+        preds_coords_all = _group(preds_coords_all, preds_lens, 0, groups)
+        preds_times_all = _group(preds_times_all, preds_lens, 0, groups)
+        targets_all = _group(targets_all, targets_lens, 0, groups)
+        targets_coords_all = _group(targets_coords_all, targets_lens, 0, groups)
+        targets_times_all = _group(targets_times_all, targets_lens, 0, groups)
+        targets_lens = _group_lens(targets_lens, groups)
+        preds_lens = _group_lens(preds_lens, groups)
         timestep_idxs = list(groups)
 
     # collect source information
