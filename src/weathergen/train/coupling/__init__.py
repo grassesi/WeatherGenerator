@@ -9,12 +9,8 @@
 
 """Coupled inference: several trained components stepped together, chunk by chunk."""
 
-from weathergen.train.coupling.coupler import (
-    Coupler,
-    Coupling,
-    Couplings,
-    ModelCheckpoint,
-    Rollout,
-)
+from weathergen.train.coupling.coupler import Coupler
+from weathergen.train.coupling.run import Couplings, ModelCheckpoint
+from weathergen.train.coupling.spec import Coupling, Rollout
 
 __all__ = ["Coupler", "Coupling", "Couplings", "ModelCheckpoint", "Rollout"]

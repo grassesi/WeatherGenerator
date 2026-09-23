@@ -596,7 +596,7 @@ def test_component_options_never_fall_back_to_sys_argv(monkeypatch):
 
     monkeypatch.setattr(config, "load_merge_configs", fake_load_merge_configs)
     monkeypatch.setattr(
-        "weathergen.train.coupling.coupler.Trainer", lambda train_logging, name: object()
+        "weathergen.train.coupling.run.Trainer", lambda train_logging, name: object()
     )
     monkeypatch.setattr(
         sys, "argv", ["prog", "coupled_inference", "spec.yml", "Atmo=abc@0", "--run-id", "x"]
