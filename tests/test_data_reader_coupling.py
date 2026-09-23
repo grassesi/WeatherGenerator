@@ -934,7 +934,9 @@ def test_missing_producer_channel_is_reported(consumer, producer_handler):
 
 
 def _forcings(consumer_handler, streams) -> ForcingInput:
-    return ForcingInput("validation", consumer_handler, streams, tokenizer=None)
+    return ForcingInput(
+        "validation", consumer_handler, streams, tokenizer=None, healpix_level=1
+    )
 
 
 def test_coupler_resolves_the_channel_map_against_the_producer(

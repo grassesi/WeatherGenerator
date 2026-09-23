@@ -170,11 +170,21 @@ class ForcingInput:
         time_window_handler: TimeWindowHandler,
         forcing_streams: dict[str, list[DataReaderBase]],
         tokenizer: TokenizerMasking,
+        healpix_level: int,
         forecast_offset: int = 1,
     ):
         self.stage = stage
         self.forcing_window_len = 1
-        self.healpix_lvl = 5  # TODO infer from MSDS
+        # the component's own data level: the tokenizer bins the forcing into these cells, and a
+        # spoofed window has to land on the same grid the model was trained on
+        self.healpix_lvl = int(healpix_level)
+        tokenizer_level = getattr(tokenizer, "healpix_level", self.healpix_lvl)
+        if tokenizer_level != self.healpix_lvl:
+            msg = (
+                f"ForcingInput built at healpix_level {self.healpix_lvl}, but its tokenizer bins "
+                f"at {tokenizer_level}; the forcing cells would not line up with the tokens."
+            )
+            raise ValueError(msg)
         self.num_healpix_cells = 12 * 4**self.healpix_lvl
 
         self.time_window_handler = time_window_handler

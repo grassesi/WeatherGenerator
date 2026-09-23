@@ -395,6 +395,7 @@ class Trainer(TrainerBase):
             self.dataset.time_window_handler,
             forcing_streams,
             self.dataset_val.tokenizer,
+            self.dataset.healpix_level,
             self.test_cfg.get("forecast", {}).get("offset", 1),
         )
 
@@ -632,6 +633,7 @@ class Trainer(TrainerBase):
             self.dataset.time_window_handler,
             forcing_streams,
             self.dataset.tokenizer,
+            self.dataset.healpix_level,
             self.training_cfg.get("forecast", {}).get("offset", 1),
         )
 
