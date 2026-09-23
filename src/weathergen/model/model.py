@@ -48,6 +48,32 @@ logger = logging.getLogger(__name__)
 type StreamName = str
 
 
+def mask_predictions(
+    pred: torch.Tensor, valid: list[torch.Tensor | None], lens: list[int]
+) -> torch.Tensor:
+    """Set predictions to NaN where the target window marks them invalid.
+
+    `pred` is [ens, N, C] over the concatenated samples, `valid[i]` is sample i's [N_i, C] bool
+    validity from `StreamData.target_valid`, in the same row order as its target coords. An
+    empty or missing `valid[i]` means nothing of sample i is masked.
+    """
+
+    if all(v is None or v.numel() == 0 for v in valid):
+        return pred
+
+    n_channels = pred.shape[-1]
+    parts = []
+    for v, n in zip(valid, lens, strict=True):
+        if v is None or v.numel() == 0:
+            v = torch.ones((n, n_channels), dtype=torch.bool)
+        assert v.shape == (n, n_channels), (
+            f"Prediction validity has shape {tuple(v.shape)}, expected {(n, n_channels)}."
+        )
+        parts.append(v.to(pred.device))
+
+    return torch.where(torch.cat(parts).unsqueeze(0), pred, torch.nan)
+
+
 class ModelOutput:
     """
     Representation of model output
@@ -885,6 +911,18 @@ class Model(torch.nn.Module):
 
                     # final prediction head to map back to physical space
                     pred = self.pred_heads[stream_name](tc_tokens)
+
+            # predictions where the target window is NaN on a masked channel carry no training
+            # signal; NaN them before anyone reads them, the writer and the coupling exchange.
+            # Validation and inference only: the training step is left untouched.
+            valid = [
+                getattr(batch.samples[i_b].streams_data[stream_name], "target_valid", None)
+                for i_b in range(batch_size)
+            ]
+            if not self.training and pred.numel() > 0 and valid[0] is not None:
+                pred = mask_predictions(
+                    pred, [v[batch_idx] if v is not None else None for v in valid], t_coords_lens
+                )
 
             # recover batch dimension (ragged, so as list)
             pred = torch.split(pred, t_coords_lens, dim=1)

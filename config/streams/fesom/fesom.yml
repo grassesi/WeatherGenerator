@@ -14,6 +14,8 @@ FESOM_NODE :
   loss_weight : 1.
   source : null
   target : ["sst", "sss", "ssh", "temp_", "salt_"]
+  # NaN the predicted sst wherever its target window has none (land)
+  mask_predictions : ["sst"]
   masking_rate : 0.6
   masking_rate_none : 0.05
   token_size : 128
