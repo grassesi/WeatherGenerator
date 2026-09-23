@@ -39,6 +39,22 @@ def readerdata_to_torch(rdata: IOReaderData) -> IOReaderData:
     return rdata
 
 
+def target_valid_mask(data, mask_cols: list[int] | None) -> torch.Tensor:
+    """
+    [N, C] bool, False where a column in mask_cols is NaN in data, True elsewhere.
+
+    data holds the target rows in prediction order. Returns an empty [0, 0] tensor when
+    mask_cols is empty, so consumers can skip masking on numel() alone.
+    """
+    if not mask_cols:
+        return torch.zeros((0, 0), dtype=torch.bool)
+    data = torch.as_tensor(data)
+    valid = torch.ones(data.shape, dtype=torch.bool)
+    cols = torch.as_tensor(mask_cols, dtype=torch.int64)
+    valid[:, cols] = ~torch.isnan(data[:, cols])
+    return valid
+
+
 class TokenizerMasking(Tokenizer):
     def __init__(self, healpix_level: int, masker: Masker):
         super().__init__(healpix_level)
@@ -157,7 +173,15 @@ class TokenizerMasking(Tokenizer):
         token_data,
         time_win: tuple,
         cell_mask,
+        mask_cols: list[int] | None = None,
     ):
+        """
+        Tokenized target geometry, plus the validity of the channels in mask_cols.
+
+        Returns (coords_local, coords_per_cell, coords_raw, datetimes, valid). valid is a
+        [N, C] bool tensor in prediction row order, False exactly where a column in mask_cols is
+        NaN in the target window and True elsewhere; it is empty when mask_cols is empty.
+        """
         # create tokenization index
         (idxs_cells, idxs_cells_lens) = token_data
 
@@ -166,7 +190,7 @@ class TokenizerMasking(Tokenizer):
         )
 
         # TODO: split up
-        _, datetimes, coords_raw, coords_local, coords_per_cell = tokenize_apply_mask_target(
+        data, datetimes, coords_raw, coords_local, coords_per_cell = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,
@@ -181,7 +205,9 @@ class TokenizerMasking(Tokenizer):
             encode_times_target,
         )
 
-        return (coords_local, coords_per_cell, coords_raw, datetimes)
+        valid = target_valid_mask(data, mask_cols)
+
+        return (coords_local, coords_per_cell, coords_raw, datetimes, valid)
 
     def get_target_values(
         self,

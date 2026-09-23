@@ -92,6 +92,33 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
     return IOReaderData.combine(rdatas)
 
 
+def resolve_mask_cols(stream_info, target_channels: Sequence[str]) -> list[int]:
+    """
+    Column indices in target_channels of the channels listed in `mask_predictions`.
+
+    target_channels is the reader's target channel list, in the column order of the data that
+    get_target returns. Raises ValueError on a name that is not a target channel, since a
+    misspelled channel would otherwise silently leave its predictions unmasked.
+    """
+    names = list(stream_info.get("mask_predictions", None) or [])
+    unknown = [n for n in names if n not in target_channels]
+    if unknown:
+        raise ValueError(
+            f"mask_predictions of stream '{stream_info.get('name')}' lists {unknown}, which "
+            f"are not target channels. Available: {list(target_channels)}."
+        )
+    return [list(target_channels).index(n) for n in names]
+
+
+def restamp_to_window(rdata: IOReaderData, src_start, dst_start) -> IOReaderData:
+    """
+    Copy of rdata with its datetimes moved from the window starting at src_start to the one
+    starting at dst_start, keeping each point's offset within the window.
+    """
+    shift = np.datetime64(dst_start) - np.datetime64(src_start)
+    return dataclasses.replace(rdata, datetimes=rdata.datetimes + shift)
+
+
 @dataclasses.dataclass
 class _Stream:
     info: Config
@@ -158,6 +185,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.samples_per_mini_epoch = mode_cfg.samples_per_mini_epoch
         self.check_samples(self._get_fsm())
         self.streams_datasets = self._init_stream_datasets(cf)
+        self.mask_cols = self._init_mask_cols()
 
         # RNG seed setup
         rs = cf.data_loading.rng_seed
@@ -326,6 +354,27 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             )
 
         return streams_datasets
+
+    def _init_mask_cols(self) -> dict[StreamName, list[int]]:
+        """Resolve each stream's `mask_predictions` to target column indices, once."""
+        mask_cols = {}
+        for stream_name, stream in self.streams_datasets.items():
+            reader = stream.readers[0]
+            mask_cols[stream_name] = resolve_mask_cols(stream.info, reader.target_channels)
+            names = [reader.target_channels[i] for i in mask_cols[stream_name]]
+            if not names or not is_root():
+                continue
+            logger.info(f"Masking predictions of {stream_name}: {names}")
+            nan_channels = getattr(reader, "nan_channels", None)
+            if nan_channels is None:
+                continue
+            for ch in names:
+                if ch not in nan_channels:
+                    logger.warning(
+                        f"mask on {ch} of {stream_name} is a no-op: the dataset declares no "
+                        "NaNs for it"
+                    )
+        return mask_cols
 
     def reset(self) -> tuple[Sequence[int], Sequence[int]]:
         """
@@ -516,12 +565,13 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 continue
 
             if "target_coords" in mode:
-                (tc, tc_l, tc_raw, tc_times) = self.tokenizer.get_target_coords(
+                (tc, tc_l, tc_raw, tc_times, tc_valid) = self.tokenizer.get_target_coords(
                     stream_info,
                     rdata,
                     token_data,
                     (time_win_target.start, time_win_target.end),
                     target_mask,
+                    mask_cols=self.mask_cols.get(stream_info.get("name"), []),
                 )
                 stream_data.add_target_coords(
                     self._stage,
@@ -531,6 +581,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     rdata.is_spoof,
                     target_coords_raw=tc_raw,
                     times_raw=tc_times,
+                    target_valid=tc_valid,
                 )
 
             if "target_values" in mode:
@@ -656,7 +707,15 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 # full spatial grid (respecting max_num_targets subsampling). Target values
                 # are from base_idx rather than the actual forecast time, so mark as spoof.
                 rdata = collect_datasources(stream_ds, base_idx, "target", self.rng)
-                if rdata.is_empty():
+                if not rdata.is_empty():
+                    # The reused window supplies geometry and validity only: stamp it with the
+                    # forecast step's valid times, else predictions are written at the init time.
+                    rdata = restamp_to_window(
+                        rdata,
+                        self.time_window_handler.window(base_idx).start,
+                        self.time_window_handler.window(step_forecast_dt).start,
+                    )
+                else:
                     # Last resort: fully synthetic spoof (work around for
                     # https://github.com/pytorch/pytorch/issues/158719).
                     time_win = self.time_window_handler.window(step_forecast_dt)

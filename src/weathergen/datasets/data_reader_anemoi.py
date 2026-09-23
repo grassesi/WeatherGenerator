@@ -153,6 +153,7 @@ class DataReaderAnemoi(DataReaderTimestep):
         }
         self.mean = ds.statistics["mean"]
         self.stdev = ds.statistics["stdev"]
+        self.nan_channels = _read_nan_channels(ds0)
 
     @override
     def init_empty(self) -> None:
@@ -313,6 +314,23 @@ class DataReaderAnemoi(DataReaderTimestep):
             )
 
         return np.array(chs_idx, dtype=np.int64)
+
+
+def _read_nan_channels(ds: Dataset) -> frozenset[str] | None:
+    """
+    Channels the dataset declares may hold NaN, from its `variables_with_nans` metadata.
+
+    Newer anemoi-datasets expose it on the dataset; older ones only keep it in the zarr attrs.
+    Returns None when neither is available, as the absence of the key does not mean "no NaNs".
+    """
+    try:
+        names = getattr(ds, "variables_with_nans", None)
+        if names is None and hasattr(ds, "z"):
+            names = ds.z.attrs.get("variables_with_nans")
+        return None if names is None else frozenset(str(n) for n in names)
+    except Exception as e:
+        _logger.debug(f"Could not read variables_with_nans: {e!r}")
+        return None
 
 
 def _clip_lat(lats: NDArray) -> NDArray[np.float32]:
