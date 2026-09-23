@@ -26,9 +26,9 @@ import pytest
 from omegaconf import OmegaConf
 
 import weathergen.common.config as config
-from weathergen.common.coupling import Coupler, Coupling, ModelCheckpoint, Rollout
 from weathergen.datasets.data_reader_base import TimeWindowHandler
 from weathergen.model.chunking import ChunkInfo
+from weathergen.train.coupling import Coupler, Coupling, ModelCheckpoint, Rollout
 from weathergen.train.trainer import ChunkPlan, Trainer
 from weathergen.train.utils import resolve_stage_configs
 
@@ -267,7 +267,7 @@ def test_output_is_written_per_chunk(no_autocast):
 
 
 def test_accumulation_preserves_chunk_order(no_autocast, monkeypatch):
-    monkeypatch.setattr("weathergen.common.coupling.extract_batch_metadata", lambda b: None)
+    monkeypatch.setattr("weathergen.train.coupling.coupler.extract_batch_metadata", lambda b: None)
     a = FakeTrainer("A", 3, accumulate=True)
     a.loss_calculator_val = type("LC", (), {"compute_loss": lambda self, **kw: kw["preds"]})()
     assembled = []
@@ -313,7 +313,7 @@ class HalvesBatch:
 def test_targets_are_computed_on_the_half_that_exists(monkeypatch, inference_only, half):
     """Trainer.validate's rule: under inference_only only the source half is built."""
     monkeypatch.setattr(
-        "weathergen.common.coupling.get_target_idxs_from_cfg", lambda cfg, name: [0]
+        "weathergen.train.coupling.coupler.get_target_idxs_from_cfg", lambda cfg, name: [0]
     )
     trainer = FakeTrainer("A", 1)
     trainer.test_cfg.inference_only = inference_only
@@ -596,7 +596,7 @@ def test_component_options_never_fall_back_to_sys_argv(monkeypatch):
 
     monkeypatch.setattr(config, "load_merge_configs", fake_load_merge_configs)
     monkeypatch.setattr(
-        "weathergen.common.coupling.Trainer", lambda train_logging, name: object()
+        "weathergen.train.coupling.coupler.Trainer", lambda train_logging, name: object()
     )
     monkeypatch.setattr(
         sys, "argv", ["prog", "coupled_inference", "spec.yml", "Atmo=abc@0", "--run-id", "x"]

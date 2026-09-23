@@ -24,8 +24,8 @@ from omegaconf import DictConfig, OmegaConf
 
 import weathergen.common.config as config
 import weathergen.utils.cli as cli
-from weathergen.common.coupling import Couplings
 from weathergen.common.logger import init_loggers
+from weathergen.train.coupling import Couplings
 from weathergen.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)

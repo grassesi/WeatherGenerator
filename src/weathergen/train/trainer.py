@@ -222,7 +222,7 @@ class Trainer(TrainerBase):
         """Decide how this batch's rollout is chunked and what to do with each chunk.
 
         Split out of the rollout loop so that an external driver can own the loop and
-        interleave the chunks of several models (see weathergen.common.coupling.Coupler).
+        interleave the chunks of several models (see weathergen.train.coupling.Coupler).
         """
         forecast_cfg = mode_cfg.get("forecast", {})
 

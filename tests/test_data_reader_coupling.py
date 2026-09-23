@@ -17,7 +17,6 @@ import pytest
 import torch
 from numpy.typing import NDArray
 
-from weathergen.common.coupling import Coupler, Coupling
 from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.batch import ModelBatch, SampleMetaData
 from weathergen.datasets.coupling_reader import DataReaderCoupling, ForcingProvenance
@@ -35,6 +34,7 @@ from weathergen.datasets.tokenizer_utils import TIMES_WIDTH, VERTEX_WIDTH
 from weathergen.model.chunking import ChunkInfo
 from weathergen.model.forcing import ForcingInput
 from weathergen.model.model import ModelOutput
+from weathergen.train.coupling import Coupler, Coupling
 
 STREAM = "ERA5-Ocean"
 N_POINTS = 7

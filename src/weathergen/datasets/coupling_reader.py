@@ -17,7 +17,7 @@ initialization time. The window arithmetic is the same either way, which is what
 mean the same thing in training and in coupled inference (`forcing_lag_design.md` L6, L7).
 
 It lives here rather than beside the `Coupler` because the training path needs it too, and
-`weathergen.common.coupling` imports the `Trainer`.
+`weathergen.train.coupling` imports the `Trainer`.
 """
 
 from __future__ import annotations

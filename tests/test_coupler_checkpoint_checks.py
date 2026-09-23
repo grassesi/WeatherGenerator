@@ -18,10 +18,10 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from weathergen.common.coupling import Coupler, Coupling
 from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.data_reader_base import DataReaderTimestep, TimeWindowHandler
 from weathergen.datasets.upsampling import UpsamplingReader
+from weathergen.train.coupling import Coupler, Coupling
 
 STREAM = "ERA5-Ocean"
 START = np.datetime64("2023-01-01T00:00")
@@ -178,7 +178,7 @@ def test_a_forcing_engine_still_at_its_initialization_is_reported(caplog):
     """Generation 01's xcpk26es and j5h3is35 shipped exactly this and nobody noticed."""
     coup = coupler(consumer_ffe_std=0.001)
 
-    with caplog.at_level(logging.ERROR, logger="weathergen.common.coupling"):
+    with caplog.at_level(logging.ERROR, logger="weathergen.train.coupling.coupler"):
         coup._check_forcing_engines()
 
     assert any("looks untrained" in r.message for r in caplog.records)
@@ -188,7 +188,7 @@ def test_a_trained_forcing_engine_passes_quietly(caplog):
     """The converse, so the probe above is not simply always firing."""
     coup = coupler(consumer_ffe_std=0.3)
 
-    with caplog.at_level(logging.ERROR, logger="weathergen.common.coupling"):
+    with caplog.at_level(logging.ERROR, logger="weathergen.train.coupling.coupler"):
         coup._check_forcing_engines()
 
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
@@ -229,7 +229,7 @@ def test_an_averaging_reader_bridges_a_finer_producer(caplog):
     """The same gap is legitimate once the wrapper that closes it is in the stack."""
     coup = coupler(producer_cadence=H6, consumer_period=H24, wrappers=(AveragingReader,))
 
-    with caplog.at_level(logging.INFO, logger="weathergen.common.coupling"):
+    with caplog.at_level(logging.INFO, logger="weathergen.train.coupling.coupler"):
         coup._check_exchange_grid()
 
     assert any(
@@ -242,7 +242,7 @@ def test_a_coarser_producer_is_held_over_with_a_warning(caplog):
     """The coupling reader restamps the covering window, so this is staleness, not absence."""
     coup = coupler(producer_cadence=H48, consumer_period=H24)
 
-    with caplog.at_level(logging.WARNING, logger="weathergen.common.coupling"):
+    with caplog.at_level(logging.WARNING, logger="weathergen.train.coupling.coupler"):
         coup._check_exchange_grid()
 
     assert any("coarser than" in r.message for r in caplog.records)
@@ -257,7 +257,7 @@ def test_an_upsampling_reader_is_recognised_as_a_bridge(caplog):
     """
     coup = coupler(producer_cadence=H24, consumer_period=H24, wrappers=(UpsamplingReader,))
 
-    with caplog.at_level(logging.INFO, logger="weathergen.common.coupling"):
+    with caplog.at_level(logging.INFO, logger="weathergen.train.coupling.coupler"):
         coup._check_exchange_grid()
 
     assert any(
@@ -295,7 +295,7 @@ def test_an_exchanged_nan_channel_left_unmasked_is_refused():
 def test_a_masked_nan_channel_passes(caplog):
     coup = coupler(producer_nan_channels=frozenset({"sst"}), producer_mask=["sst"])
 
-    with caplog.at_level(logging.INFO, logger="weathergen.common.coupling"):
+    with caplog.at_level(logging.INFO, logger="weathergen.train.coupling.coupler"):
         coup._check_exchange_masks()
 
     assert any("masked ['sst']" in r.message for r in caplog.records)
@@ -311,7 +311,7 @@ def test_unknown_nan_channels_warn_instead_of_refusing(caplog):
     """A reader that cannot say which channels carry NaNs leaves the check unable to run."""
     coup = coupler(producer_nan_channels=None)
 
-    with caplog.at_level(logging.WARNING, logger="weathergen.common.coupling"):
+    with caplog.at_level(logging.WARNING, logger="weathergen.train.coupling.coupler"):
         coup._check_exchange_masks()
 
     assert any(
@@ -330,7 +330,7 @@ def test_provenance_names_the_checkpoint_of_every_component(caplog):
         "Atmo": types.SimpleNamespace(run_id="ta816nwq", mini_epoch=1455),
     }
 
-    with caplog.at_level(logging.INFO, logger="weathergen.common.coupling"):
+    with caplog.at_level(logging.INFO, logger="weathergen.train.coupling.coupler"):
         coup._report_checkpoint_provenance(checkpoints)
 
     lines = [r.message for r in caplog.records if "provenance" in r.message]
