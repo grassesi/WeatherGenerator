@@ -162,8 +162,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         # start_date + idx * time_window_step, so components on different sampling grids only
         # share an absolute time axis if each strides by its own count of windows. Set by the
         # coupled driver, which owns the duration -> index conversion (as init_stride_chunks,
-        # converted to forecast steps in Coupler._derive_component_configs); 1 everywhere else,
-        # which is the previous behaviour exactly.
+        # converted to forecast steps in coupling.derivation.derive_component_configs); 1
+        # everywhere else, which is the previous behaviour exactly.
         self.sample_stride = int(mode_cfg.get("init_stride_fsteps", 1))
         self._check_stride_config(self.shuffle, self.sample_stride)
 

@@ -136,7 +136,7 @@ class Couplings:
         each component on top of its checkpoint. They are the only way to reach a component's
         config at all -- a coupled run takes its rollout from the couplings file, but settings
         that are properties of the *execution* rather than the rollout (with_fsdp, say) have
-        nowhere else to live. Whatever they set, `Coupler._derive_component_configs` still
+        nowhere else to live. Whatever they set, `derive_component_configs` still
         overrides the rollout keys afterwards, so the couplings file stays authoritative for
         the horizon, window and chunking.
         """

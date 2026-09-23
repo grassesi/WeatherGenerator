@@ -29,6 +29,7 @@ import weathergen.common.config as config
 from weathergen.datasets.data_reader_base import TimeWindowHandler
 from weathergen.model.chunking import ChunkInfo
 from weathergen.train.coupling import Coupler, Coupling, ModelCheckpoint, Rollout
+from weathergen.train.coupling.checks import resolve_couplings
 from weathergen.train.coupling.derivation import derive_component_configs
 from weathergen.train.coupling.spec import produced_streams
 from weathergen.train.trainer import ChunkPlan, Trainer
@@ -214,17 +215,9 @@ def make_component_cf(window_step, time_step, *, shuffle=True, policy="sequentia
 
 def derive(components, couplings=None, rollout=None):
     """Run the derivation over raw configs and hand back each effective test_cfg."""
-    coupler = Coupler(
-        {name: (None, cf) for name, cf in components.items()},
-        couplings,
-        rollout or make_rollout(),
-    )
-    coupler._check_couplings()
-    derive_component_configs(
-        {name: coupler.config(name) for name in coupler._names},
-        coupler._rollout,
-        coupler._couplings,
-    )
+    configs = {name: components[name] for name in sorted(components)}
+    live = resolve_couplings(couplings or {}, configs)
+    derive_component_configs(configs, rollout or make_rollout(), live)
 
     return {name: resolve_stage_configs(cf)[2] for name, cf in components.items()}
 
@@ -617,27 +610,25 @@ def test_component_options_never_fall_back_to_sys_argv(monkeypatch):
 
 def test_coupling_naming_an_unknown_component_is_rejected():
     coupling = Coupling(name="A-B", producer="Ocean", consumer="Atmo", stream="ERA5-Ocean")
-    coupler = make_coupler({"Atmo": FakeTrainer("Atmo", 1)}, {"A-B": coupling})
+    configs = {"Atmo": FakeTrainer("Atmo", 1).cf}
 
     with pytest.raises(ValueError, match="not one of the components"):
-        coupler._check_couplings()
+        resolve_couplings({"A-B": coupling}, configs)
 
 
 def test_coupling_naming_an_unknown_stream_is_dropped(caplog):
     """One couplings file serves several component pairs, so a stream this pair does not
     carry is dropped rather than fatal -- with a warning, since it also looks like a typo."""
     coupling = Coupling(name="A-B", producer="Ocean", consumer="Atmo", stream="missing")
-    coupler = make_coupler(
-        {"Atmo": FakeTrainer("Atmo", 1), "Ocean": FakeTrainer("Ocean", 1)}, {"A-B": coupling}
-    )
+    configs = {"Atmo": FakeTrainer("Atmo", 1).cf, "Ocean": FakeTrainer("Ocean", 1).cf}
 
     with caplog.at_level(logging.WARNING):
-        coupler._check_couplings()
+        live = resolve_couplings({"A-B": coupling}, configs)
 
-    assert coupler._couplings == {}
+    assert live == {}
     assert "dropped" in caplog.text
     # dropped everywhere, not just from the check: nothing is written for it either
-    assert produced_streams(coupler._couplings, "Ocean") == []
+    assert produced_streams(live, "Ocean") == []
 
 
 # --------------------------------------------------------------------------------------
