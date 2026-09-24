@@ -32,8 +32,10 @@ from weathergen.datasets.utils import healpix_verts_rots, r3tos2
 from weathergen.model.forcing import ForcingEngine, ForcingInput
 from weathergen.model.forecast_conditioning import (
     AdaLNConditioning,
+    TimeConditioning,
     build_forecast_conditioning,
     check_conditioning_keys,
+    encode_time_window,
     forcing_cell_index,
     scatter_to_cells,
 )
@@ -121,7 +123,7 @@ def test_forward_expands_to_the_token_layout_with_unconditioned_aux_tokens():
     tokens = torch.randn(2, num_aux + cond.num_cells * 2, 4)
     encoded = torch.randn(2, cond.num_cells, 8)
 
-    out_tokens, aux = cond(tokens, encoded)
+    out_tokens, aux = cond(tokens, (encoded, None))
 
     assert out_tokens is tokens
     assert aux.shape == (2, tokens.shape[1], 8)
@@ -324,3 +326,66 @@ def test_the_trainer_reads_each_stage_forcing_on_its_own_dataset():
     assert forcings.stage == VAL
     assert list(forcings.forcing_streams) == ["FAKE"]
     assert forcings.time_window_handler.t_start == val_start
+
+
+####################################################################################################
+# time conditioning
+
+
+def test_time_features_of_a_window():
+    start = np.datetime64("2023-01-25T12:00", "ms")
+    end = start + np.timedelta64(6, "h")
+    variables = ["start_day", "start_time", "end_day", "end_time"]
+
+    assert encode_time_window(start, end, variables, "absolute", 16) == [25.5, 12.0, 25.75, 18.0]
+    cos_sin = encode_time_window(start, end, ["start_time"], "cos_sin", 16)
+    np.testing.assert_allclose(cos_sin, [np.cos(np.pi), np.sin(np.pi)], atol=1e-12)
+    fourier = encode_time_window(start, end, ["start_day"], "fourier", 4)
+    angle = 2 * np.pi * 25.5 / 365.0
+    np.testing.assert_allclose(
+        fourier, [np.cos(angle), np.sin(angle), np.cos(2 * angle), np.sin(2 * angle)]
+    )
+
+
+def test_time_conditioning_reads_the_window_each_sample_predicts():
+    import types
+
+    handler = TimeWindowHandler(START, END, WINDOW_LEN, WINDOW_STEP)
+    forcings = types.SimpleNamespace(time_window_handler=handler)
+    time = TimeConditioning(dim_cond=8, variables=["start_time"], transform="absolute")
+
+    # consecutive 6 h windows from 00Z: sample 0 predicts window 1, sample 1 window 3
+    np.testing.assert_array_equal(time.features(forcings, [1, 3]), [[6.0], [18.0]])
+    assert time(forcings, [1, 3], torch.device("cpu")).shape == (2, 8)
+
+
+def test_time_alone_is_a_valid_adaln_conditioning():
+    cf = _cf({}, {"type": "adaln", "dim_cond": 8, "time": {"transform": "cos_sin"}})
+    cond = build_forecast_conditioning(cf, {})
+    assert cond.embed is None and cond.time.num_features == 8
+    assert cond.is_active(types_forcings(empty=True))
+
+    with pytest.raises(ValueError, match="needs a stream with is_dynamic_forcing"):
+        build_forecast_conditioning(_cf({}, {"type": "adaln"}), {})
+
+
+def types_forcings(empty: bool):
+    import types
+
+    return types.SimpleNamespace(is_empty=empty)
+
+
+def test_time_reaches_every_token_and_adds_to_the_forcing():
+    cond = _conditioning(num_queries=2)
+    num_aux = 3
+    tokens = torch.randn(2, num_aux + cond.num_cells * 2, 4)
+    cells = torch.randn(2, cond.num_cells, 8)
+    time = torch.randn(2, 8)
+
+    _, aux = cond(tokens, (cells, time))
+
+    torch.testing.assert_close(aux[:, :num_aux], time.unsqueeze(1).expand(2, num_aux, 8))
+    torch.testing.assert_close(aux[:, num_aux::2], cells + time.unsqueeze(1))
+
+    _, aux_time_only = cond(tokens, (None, time))
+    torch.testing.assert_close(aux_time_only, time.unsqueeze(1).expand_as(aux_time_only))

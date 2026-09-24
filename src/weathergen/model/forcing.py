@@ -132,7 +132,7 @@ class ForcedModel(Model):
             forcing_idx = step * chunk.step_stride
 
             fe_aux = None
-            if not dynamic_forcings.is_empty:
+            if self.forcing_engine.is_active(dynamic_forcings):
                 forcing_sampling_idxs = [
                     sample_idx + forcing_idx for sample_idx in source_sampling_idxs
                 ]

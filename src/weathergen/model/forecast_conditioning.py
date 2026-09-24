@@ -103,6 +103,10 @@ class ForecastConditioning(nn.Module, ABC):
     def check_model(self, model: Model) -> None:  # noqa: B027
         """Raise if the built model cannot carry this conditioning. Called after `create`."""
 
+    def is_active(self, forcings: ForcingInput) -> bool:
+        """Whether a rollout step is conditioned at all; by default, when there is a forcing."""
+        return not forcings.is_empty
+
     @abstractmethod
     def encode(
         self,
@@ -276,6 +280,135 @@ class ForcingEmbed(nn.Module):
         return self.mlp(x.to(self.mlp[0].weight.dtype))
 
 
+####################################################################################################
+# time conditioning
+
+# period of each time variable, in the unit its raw value is given in
+TIME_PERIODS = {"start_day": 365.0, "end_day": 365.0, "start_time": 24.0, "end_time": 24.0}
+TIME_TRANSFORMS = ("absolute", "absolute_normalized", "cos_sin", "fourier")
+
+
+def _day_of_year(dt: np.datetime64) -> float:
+    """1-indexed day of year."""
+    jan1 = dt.astype("datetime64[Y]").astype("datetime64[D]")
+    return float((dt.astype("datetime64[D]") - jan1).astype(int) + 1)
+
+
+def _hour_of_day(dt: np.datetime64) -> float:
+    """Fractional hour of day in [0, 24)."""
+    return float((dt - dt.astype("datetime64[D]")) / np.timedelta64(1, "h"))
+
+
+def encode_time_window(
+    start: np.datetime64,
+    end: np.datetime64,
+    variables: list[str],
+    transform: str,
+    emb_dimension: int,
+) -> list[float]:
+    """
+    Time features of a window, as `DataReaderCondition._encode` computes them.
+
+    Days are fractional (day 25 at 12:00 is 25.5), so every 6 h window is distinct. `fourier`
+    gives, per variable, cos/sin at the first `emb_dimension // 2` harmonics of its period.
+    """
+    raw = {
+        "start_day": _day_of_year(start) + _hour_of_day(start) / 24.0,
+        "start_time": _hour_of_day(start),
+        "end_day": _day_of_year(end) + _hour_of_day(end) / 24.0,
+        "end_time": _hour_of_day(end),
+    }
+    values: list[float] = []
+    for var in variables:
+        if transform == "absolute":
+            values.append(raw[var])
+        elif transform == "absolute_normalized":
+            values.append(raw[var] / TIME_PERIODS[var])
+        elif transform == "cos_sin":
+            angle = 2.0 * np.pi * raw[var] / TIME_PERIODS[var]
+            values += [np.cos(angle), np.sin(angle)]
+        elif transform == "fourier":
+            for k in range(1, emb_dimension // 2 + 1):
+                angle = 2.0 * np.pi * k * raw[var] / TIME_PERIODS[var]
+                values += [np.cos(angle), np.sin(angle)]
+    return [float(v) for v in values]
+
+
+class TimeConditioning(nn.Module):
+    """
+    The valid time of a forecast step as a conditioning vector, one per sample.
+
+    A port of the `condition` stream of `ForcingInjection` (`DataReaderCondition`): the same
+    features of the same window -- the one the step predicts, on the component's own, unlagged
+    timeline -- but computed from the window directly, without a reader or a sampler path, and
+    per sample instead of shared by the batch. An MLP maps them to the conditioning width.
+    """
+
+    def __init__(
+        self,
+        dim_cond: int,
+        variables: list[str] | None = None,
+        transform: str = "fourier",
+        emb_dimension: int = 16,
+        hidden_factor: int = 2,
+    ) -> None:
+        super().__init__()
+        self.name = "forecast_conditioning_time"
+        self.variables = list(variables or ["start_day", "start_time", "end_day", "end_time"])
+        unknown = set(self.variables) - set(TIME_PERIODS)
+        if unknown:
+            raise ValueError(f"Unknown time variables {sorted(unknown)}, known: {TIME_PERIODS}.")
+        if transform not in TIME_TRANSFORMS:
+            raise ValueError(f"Unknown time transform '{transform}', expected {TIME_TRANSFORMS}.")
+        if transform == "fourier" and emb_dimension < 2:
+            raise ValueError("The fourier time transform needs emb_dimension >= 2.")
+        self.transform = transform
+        self.emb_dimension = emb_dimension
+
+        per_variable = {
+            "absolute": 1,
+            "absolute_normalized": 1,
+            "cos_sin": 2,
+            "fourier": 2 * (emb_dimension // 2),
+        }[transform]
+        self.num_features = per_variable * len(self.variables)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.num_features, hidden_factor * dim_cond),
+            nn.SiLU(),
+            nn.Linear(hidden_factor * dim_cond, dim_cond),
+        )
+
+    @classmethod
+    def from_config(cls, time_cfg, dim_cond: int, hidden_factor: int) -> TimeConditioning | None:
+        """The time conditioning a `forecast_conditioning.time` block asks for, or None."""
+        if not time_cfg:
+            return None
+        return cls(
+            dim_cond,
+            variables=time_cfg.get("variables", None),
+            transform=time_cfg.get("transform", "fourier"),
+            emb_dimension=time_cfg.get("emb_dimension", 16),
+            hidden_factor=hidden_factor,
+        )
+
+    def features(self, forcings: ForcingInput, sampling_idxs: list[int]) -> NDArray:
+        """``[B, num_features]`` for the windows the samples' current step predicts."""
+        windows = [forcings.time_window_handler.window(idx) for idx in sampling_idxs]
+        return np.asarray(
+            [
+                encode_time_window(
+                    w.start, w.end, self.variables, self.transform, self.emb_dimension
+                )
+                for w in windows
+            ],
+            dtype=np.float32,
+        )
+
+    def forward(self, forcings: ForcingInput, sampling_idxs: list[int], device) -> torch.Tensor:
+        feats = torch.as_tensor(self.features(forcings, sampling_idxs), device=device)
+        return self.mlp(feats.to(self.mlp[0].weight.dtype))
+
+
 @register
 class AdaLNConditioning(ForecastConditioning):
     """
@@ -289,13 +422,18 @@ class AdaLNConditioning(ForecastConditioning):
     (`ModulatedLayerNorm`). The modulation is a `ZeroLinear`, so the conditioned model starts
     as the unconditioned one on every initialisation path and aux tokens are never modulated.
 
+    With a `time` block, the step's valid time (`TimeConditioning`, the original's `condition`
+    stream) is added to the conditioning of every token, aux tokens included: time is global.
+    Time alone, without any dynamic forcing stream, is a valid configuration.
+
     Differences to the original: the forcing comes through `ForcingInput` instead of a dedicated
-    `type: forcing` sampler path, it is per sample instead of shared by the batch, it needs no
-    `condition` stream, and the FE keeps its own norms, with the modulation added on top.
+    `type: forcing` sampler path, it is per sample instead of shared by the batch, time is derived
+    from the step's window instead of read from a `condition` stream and is optional, and the FE
+    keeps its own norms, with the modulation added on top.
     """
 
     method = "adaln"
-    state_key_pattern = re.compile(r"forcing_engine\.(embed|pools)\.|\.modulation\.weight$")
+    state_key_pattern = re.compile(r"forcing_engine\.(embed|pools|time)\.|\.modulation\.weight$")
 
     def __init__(
         self,
@@ -306,6 +444,7 @@ class AdaLNConditioning(ForecastConditioning):
         dim_cond: int = 256,
         hidden_factor: int = 2,
         pool: str = "mean",
+        time: dict | None = None,
     ) -> None:
         super().__init__()
         assert len(streams) == len(stream_channels)
@@ -329,7 +468,17 @@ class AdaLNConditioning(ForecastConditioning):
             if pool == "learned"
             else None
         )
-        self.embed = ForcingEmbed(sum(self.stream_channels), dim_cond, hidden_factor)
+        self.embed = (
+            ForcingEmbed(sum(self.stream_channels), dim_cond, hidden_factor)
+            if self.streams
+            else None
+        )
+        self.time = TimeConditioning.from_config(time, dim_cond, hidden_factor)
+        if self.embed is None and self.time is None:
+            raise ValueError(
+                "forecast_conditioning.type: adaln needs a stream with is_dynamic_forcing: true, "
+                "a forecast_conditioning.time block, or both."
+            )
 
         # the point -> cell index of a forcing grid, keyed by stream and grid; grids are fixed
         # per stream, so this is computed once per stream and device
@@ -340,12 +489,9 @@ class AdaLNConditioning(ForecastConditioning):
         cls, cf: Config, forcing_num_channels: dict[str, int] | None
     ) -> AdaLNConditioning:
         streams = dynamic_forcing_streams(cf)
-        if not streams:
-            raise ValueError(
-                "forecast_conditioning.type: adaln needs at least one stream with "
-                "is_dynamic_forcing: true."
-            )
-        if forcing_num_channels is None or not set(streams) <= set(forcing_num_channels):
+        if streams and (
+            forcing_num_channels is None or not set(streams) <= set(forcing_num_channels)
+        ):
             raise ValueError(
                 f"AdaLN conditioning needs the source channel count of forcing streams {streams}, "
                 f"got {forcing_num_channels}."
@@ -366,6 +512,7 @@ class AdaLNConditioning(ForecastConditioning):
             dim_cond=ccf.get("dim_cond", 256),
             hidden_factor=ccf.get("hidden_factor", 2),
             pool=ccf.get("pool", "mean"),
+            time=ccf.get("time", None),
         )
 
     def check_model(self, model: Model) -> None:
@@ -417,31 +564,45 @@ class AdaLNConditioning(ForecastConditioning):
             pooled.append(torch.cat([*cell_values, *cell_valid], dim=-1))
         return torch.stack(pooled)
 
-    def encode(self, model, model_params, forcings, sampling_idxs, source_masks, device):
-        fields = forcings.get_fields(sampling_idxs)
-        pooled = self.pool_fields(fields, device)
-        num_vars = pooled.shape[-1] // 2
-        return self.embed(pooled[..., :num_vars], pooled[..., num_vars:])
+    def is_active(self, forcings) -> bool:
+        return not forcings.is_empty or self.time is not None
 
-    def forward(self, tokens: torch.Tensor, encoded: torch.Tensor):
+    def encode(self, model, model_params, forcings, sampling_idxs, source_masks, device):
+        """``(per-cell forcing [B, cells, dim_cond] | None, time [B, dim_cond] | None)``."""
+        cells = None
+        if self.embed is not None:
+            fields = forcings.get_fields(sampling_idxs)
+            pooled = self.pool_fields(fields, device)
+            num_vars = pooled.shape[-1] // 2
+            cells = self.embed(pooled[..., :num_vars], pooled[..., num_vars:])
+        time = self.time(forcings, sampling_idxs, device) if self.time is not None else None
+        return cells, time
+
+    def forward(self, tokens: torch.Tensor, encoded: tuple):
         """Leave the tokens alone; return the per-token conditioning of the forecast engine."""
+        cells, time = encoded
         batch_size, num_tokens, _ = tokens.shape
-        assert encoded.shape[:2] == (batch_size, self.num_cells), (
-            f"Conditioning of shape {tuple(encoded.shape)} for {batch_size} samples and "
-            f"{self.num_cells} cells."
-        )
         num_cell_tokens = self.num_cells * self.num_queries
         num_aux = num_tokens - num_cell_tokens
         assert num_aux >= 0, f"{num_tokens} latent tokens for {num_cell_tokens} cell tokens."
 
-        cond_cells = encoded.repeat_interleave(self.num_queries, dim=1)
-        cond_aux = cond_cells.new_zeros(batch_size, num_aux, cond_cells.shape[-1])
-        return tokens, torch.cat([cond_aux, cond_cells], dim=1)
+        cond = None
+        if cells is not None:
+            assert cells.shape[:2] == (batch_size, self.num_cells), (
+                f"Conditioning of shape {tuple(cells.shape)} for {batch_size} samples and "
+                f"{self.num_cells} cells."
+            )
+            cond_cells = cells.repeat_interleave(self.num_queries, dim=1)
+            cond_aux = cond_cells.new_zeros(batch_size, num_aux, cond_cells.shape[-1])
+            cond = torch.cat([cond_aux, cond_cells], dim=1)
+        if time is not None:
+            # global: every token, register/class tokens included, sees the step's time
+            time = time.unsqueeze(1).expand(batch_size, num_tokens, time.shape[-1])
+            cond = time if cond is None else cond + time
+        return tokens, cond
 
     def fsdp_modules(self) -> Iterable[nn.Module]:
-        modules = [self.embed]
-        if self.pools is not None:
-            modules.append(self.pools)
+        modules = [m for m in (self.embed, self.pools, self.time) if m is not None]
         return (m for module in modules for m in module.modules())
 
     def _modulations(self, model: Model) -> list[ZeroLinear]:
