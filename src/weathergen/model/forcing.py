@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 import itertools as it
 import logging
+import re
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -33,10 +35,14 @@ from weathergen.datasets.tokenizer_masking import TokenizerMasking
 from weathergen.datasets.utils import get_tokens_lens
 from weathergen.model.attention import MultiCrossAttentionHeadVarlen
 from weathergen.model.chunking import ChunkInfo
+from weathergen.model.forecast_conditioning import (
+    ForecastConditioning,
+    build_forecast_conditioning,
+    register,
+)
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelOutput, ModelParams
-from weathergen.model.utils import get_num_parameters
-from weathergen.utils.utils import get_dtype
+from weathergen.utils.utils import get_dtype, is_stream_diagnostic
 
 _logger = logging.getLogger(__name__)
 
@@ -49,19 +55,40 @@ def _innermost(reader: DataReaderBase) -> DataReaderBase:
 
 
 class ForcedModel(Model):
-    def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size):
+    def __init__(
+        self,
+        cf: Config,
+        sources_size,
+        targets_num_channels,
+        targets_coords_size,
+        forcing_num_channels: dict[str, int] | None = None,
+    ):
         super().__init__(cf, sources_size, targets_num_channels, targets_coords_size)
 
-        self.forcing_engine = ForcingEngine(self.cf, self.cf.get("ffe_num_blocks", 0))
+        # the forecast conditioning; the name predates the interface and is kept so the
+        # cross-attention engine's checkpoint keys and freeze patterns stay valid
+        self.forcing_engine: ForecastConditioning = build_forecast_conditioning(
+            self.cf, forcing_num_channels
+        )
+
+    def _fe_modulation_dim(self) -> int | None:
+        return self.forcing_engine.fe_modulation_dim
+
+    def create(self) -> ForcedModel:
+        super().create()
+        self.forcing_engine.check_model(self)
+        return self
 
     def _gather_parameters(self) -> dict[str, int]:
         num_params = super()._gather_parameters()
-        num_params["ffe"] = get_num_parameters(self.forcing_engine.blocks)
+        num_params["ffe"] = sum(
+            p.numel() for p in self.forcing_engine.conditioning_parameters(self) if p.requires_grad
+        )
         return num_params
 
     def _print_components(self, num_params):
         super()._print_components(num_params)
-        print(f" Forecast forcing engine: {num_params['ffe']:,}")
+        print(f" Forecast conditioning ({self.forcing_engine.method}): {num_params['ffe']:,}")
 
     def forward(
         self,
@@ -104,26 +131,32 @@ class ForcedModel(Model):
             # with the forecast step whenever `forecast.time_step > time_window_step`.
             forcing_idx = step * chunk.step_stride
 
+            fe_aux = None
             if not dynamic_forcings.is_empty:
-                # reembedd forcings
                 forcing_sampling_idxs = [
                     sample_idx + forcing_idx for sample_idx in source_sampling_idxs
                 ]
-                forcings = dynamic_forcings.get_data(forcing_sampling_idxs, source_masks)
-                forcings = forcings.to_device(tokens.device)
-                forcing_tokens, _ = self.encoder(model_params, forcings)
-
-                # combine forcings with current latent space
-                tokens = self.forcing_engine(tokens, forcing_tokens)
+                encoded = self.forcing_engine.encode(
+                    self,
+                    model_params,
+                    dynamic_forcings,
+                    forcing_sampling_idxs,
+                    source_masks,
+                    tokens.device,
+                )
+                # apply to the latent state and/or condition the forecast engine
+                tokens, fe_aux = self.forcing_engine(tokens, encoded)
 
             without_grad = p_fwd and self.training and step != final_step
             if without_grad:
                 # Pushforward mode: advance tokens without grad; no decoding
                 with torch.no_grad():
-                    tokens = self.forecast_engine(tokens, step, coords=model_params.rope_coords)
+                    tokens = self.forecast_engine(
+                        tokens, step, coords=model_params.rope_coords, aux=fe_aux
+                    )
                 continue
 
-            tokens = self.forecast_engine(tokens, step, coords=model_params.rope_coords)
+            tokens = self.forecast_engine(tokens, step, coords=model_params.rope_coords, aux=fe_aux)
             # decoder predictions
             output = self.predict_decoders(model_params, step, tokens, source_samples, output)
             # latent predictions (raw and with SSL heads)
@@ -294,6 +327,29 @@ class ForcingInput:
 
         return forcing_samples
 
+    def get_fields(self, sampling_idxs: list[int]) -> list[dict[str, IOReaderData]]:
+        """
+        Read every forcing stream for the window of a rollout step, without tokenizing it.
+
+        The same reads as `get_data` -- each stream on its own lagged timeline, through its
+        reader stack (coupling, averaging, elevation), normalized, spoofed if empty -- but
+        returned as point clouds, one dict of stream -> data per sample. Source masks do not
+        apply: the full field is returned whether or not the stream is an encoder input.
+        """
+        fields = []
+        for idx in sampling_idxs:
+            sample = {}
+            for stream, readers in self.forcing_streams.items():
+                rdata = self._read_forcing_data(readers, idx)
+                if rdata.is_empty():
+                    # `spoof` leaves `is_spoof` unset; a consumer of the field must see it
+                    rdata = dataclasses.replace(
+                        self._spoof(readers, self.handler(stream).window(idx)), is_spoof=True
+                    )
+                sample[stream] = rdata
+            fields.append(sample)
+        return fields
+
     def _build_stream_data(self, sampling_idx: int, stream: str, input_mask: MaskData):
         """
         Build stream data equivalent to "network_input" mode for a particular stream.
@@ -347,6 +403,14 @@ class ForcingInput:
         self, dataset_readers: list[DataReaderBase], idx: int, time_window: DTRange
     ) -> IOReaderData:
         """Collect forcing data for particular stream from all reader. Spoof if none."""
+        combined_data = self._read_forcing_data(dataset_readers, idx)
+        if combined_data.is_empty():
+            combined_data = self._spoof(dataset_readers, time_window)
+
+        return combined_data
+
+    def _read_forcing_data(self, dataset_readers: list[DataReaderBase], idx: int) -> IOReaderData:
+        """Read, clean and normalize one stream's forcing from all its readers; may be empty."""
         rdatas = []
         for file_reader in dataset_readers:
             # shuffle = ds.stream_info.get("shuffle_source", False)
@@ -364,20 +428,47 @@ class ForcingInput:
             )
             rdatas.append(rdata)
 
-        combined_data = IOReaderData.combine(rdatas)
-        if combined_data.is_empty():
-            example_reader = dataset_readers[0]
-            combined_data = spoof(
-                self.healpix_lvl,
-                time_window.start,
-                example_reader.get_geoinfo_size(),
-                len(example_reader.mean[example_reader.source_idx]),
-            )
+        return IOReaderData.combine(rdatas)
 
-        return combined_data
+    def _spoof(self, dataset_readers: list[DataReaderBase], time_window: DTRange) -> IOReaderData:
+        """Placeholder data for a stream that has none in `time_window`."""
+        example_reader = dataset_readers[0]
+        return spoof(
+            self.healpix_lvl,
+            time_window.start,
+            example_reader.get_geoinfo_size(),
+            len(example_reader.mean[example_reader.source_idx]),
+        )
 
 
-class ForcingEngine(torch.nn.Module):
+@register
+class ForcingEngine(ForecastConditioning):
+    """
+    Reembed + cross-attention forecast conditioning: the forcing is tokenized and encoded by the
+    model's own encoder, and the latent tokens cross-attend to it before every forecast step.
+
+    The forcing streams must be encoder inputs: `get_data` tokenizes them under the sample's own
+    source masks, so a diagnostic stream would be encoded as nothing.
+    """
+
+    method = "cross_attention"
+    state_key_pattern = re.compile(r"forcing_engine\.blocks\.")
+
+    @classmethod
+    def from_config(cls, cf: Config, forcing_num_channels=None) -> ForcingEngine:
+        for stream in [n for n, i in cf.streams.items() if i.get("is_dynamic_forcing", False)]:
+            info = cf.streams[stream]
+            # stage-less: the sampler resolves only the active stage's `<stage>_source_channels`
+            if is_stream_diagnostic(info):
+                raise ValueError(
+                    f"Dynamic forcing stream '{stream}' is not an encoder input (diagnostic or "
+                    "without source channels), and cross-attention forecast conditioning "
+                    "re-encodes the forcing under the sample's source masks, so it would force "
+                    "with nothing. Make it a source stream, or use forecast_conditioning.type: "
+                    "adaln, which does not need the encoder."
+                )
+        return cls(cf, cf.get("ffe_num_blocks", 0))
+
     def __init__(self, cf: Config, n_blocks=1):
         super().__init__()
         self.cf = cf
@@ -427,7 +518,24 @@ class ForcingEngine(torch.nn.Module):
             ),
         ]
 
+    def encode(self, model, model_params, forcings, sampling_idxs, source_masks, device):
+        """Tokenize the forcing and re-embed it with the model's own encoder."""
+        forcing_batch = forcings.get_data(sampling_idxs, source_masks)
+        forcing_batch = forcing_batch.to_device(device)
+        forcing_tokens, _ = model.encoder(model_params, forcing_batch)
+        return forcing_tokens
+
+    def fsdp_modules(self) -> Iterable[torch.nn.Module]:
+        return self.blocks.modules()
+
+    def conditioning_parameters(self, model) -> Iterator[torch.nn.Parameter]:
+        return self.blocks.parameters()
+
     def forward(self, latent_tokens, forcing_tokens):
+        """Cross-attend the latent to the forcing tokens; the forecast engine gets no `aux`."""
+        return self._cross_attend(latent_tokens, forcing_tokens), None
+
+    def _cross_attend(self, latent_tokens, forcing_tokens):
         # MultiCrossAttentionHeadVarlen expects flattened varlen tokens + lens vectors.
         # Here we adapt from batched [B, T, D] tensors and restore shape afterwards.
         assert latent_tokens.ndim == 3, (

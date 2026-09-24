@@ -194,6 +194,43 @@ def test_a_trained_forcing_engine_passes_quietly(caplog):
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
+def adaln_consumer(coup: Coupler, trained: bool) -> None:
+    """Make the consumer an AdaLN-conditioned model, its modulation at zero unless trained."""
+    from weathergen.model.forecast_conditioning import AdaLNConditioning
+    from weathergen.model.norms import ZeroLinear
+
+    conditioning = AdaLNConditioning([STREAM], [1], healpix_level=0, num_queries=1, dim_cond=4)
+    forecast_engine = torch.nn.ModuleList([ZeroLinear(4, 8), ZeroLinear(4, 8)])
+    if trained:
+        with torch.no_grad():
+            forecast_engine[1].weight.normal_()
+    consumer = coup.trainer("Atmo")
+    consumer.model = types.SimpleNamespace(
+        forcing_engine=conditioning, forecast_engine=forecast_engine
+    )
+
+
+def test_an_adaln_consumer_at_its_zero_modulation_is_reported(caplog):
+    """AdaLN has no 0.001 spread to test; an exactly-zero modulation is its untrained state."""
+    coup = coupler()
+    adaln_consumer(coup, trained=False)
+
+    with caplog.at_level(logging.ERROR, logger="weathergen.common.coupling"):
+        coup._check_forcing_engines()
+
+    assert any("'adaln' forecast conditioning looks untrained" in r.message for r in caplog.records)
+
+
+def test_a_trained_adaln_consumer_passes_quietly(caplog):
+    coup = coupler()
+    adaln_consumer(coup, trained=True)
+
+    with caplog.at_level(logging.ERROR, logger="weathergen.common.coupling"):
+        coup._check_forcing_engines()
+
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
 def test_a_dead_coupling_is_not_checked():
     """Only what subscribe() substituted is checked; a declared-but-dead coupling is not.
 

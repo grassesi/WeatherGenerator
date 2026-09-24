@@ -13,7 +13,7 @@ import torch
 from flash_attn import flash_attn_func, flash_attn_varlen_func
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
-from weathergen.model.norms import AdaLayerNorm, RMSNorm
+from weathergen.model.norms import AdaLayerNorm, RMSNorm, modulated_norm
 from weathergen.model.positional_encoding import rotary_pos_emb_2d
 
 """
@@ -226,6 +226,7 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
         with_2d_rope=False,
+        dim_modulation=None,
     ):
         super(MultiSelfAttentionHeadLocal, self).__init__()
 
@@ -247,6 +248,8 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
+        if dim_modulation is not None:
+            self.lnorm = modulated_norm(self.lnorm, dim_modulation)
         self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
@@ -541,6 +544,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
         with_2d_rope=False,
+        dim_modulation=None,
     ):
         super(MultiSelfAttentionHead, self).__init__()
 
@@ -563,6 +567,8 @@ class MultiSelfAttentionHead(torch.nn.Module):
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
+        if dim_modulation is not None:
+            self.lnorm = modulated_norm(self.lnorm, dim_modulation)
         self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)

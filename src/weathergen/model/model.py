@@ -412,6 +412,10 @@ class Model(torch.nn.Module):
         else:
             assert False, f"Unknown latent prediction head type {loss_cfg['head']}"
 
+    def _fe_modulation_dim(self) -> int | None:
+        """Width of the per-token conditioning the forecast engine's norms are modulated by."""
+        return None
+
     def create(self) -> "Model":
         """Create each individual module of the model"""
         cf = self.cf
@@ -422,7 +426,9 @@ class Model(torch.nn.Module):
 
         mode_cfg = cf.training_config
         if cf.fe_num_blocks > 0:
-            self.forecast_engine = ForecastingEngine(cf, mode_cfg, self.num_healpix_cells)
+            self.forecast_engine = ForecastingEngine(
+                cf, mode_cfg, self.num_healpix_cells, dim_modulation=self._fe_modulation_dim()
+            )
         else:
             self.forecast_engine = IdentityEngine()
 

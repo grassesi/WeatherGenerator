@@ -11,7 +11,7 @@
 import torch
 import torch.nn as nn
 
-from weathergen.model.norms import AdaLayerNorm, RMSNorm
+from weathergen.model.norms import AdaLayerNorm, RMSNorm, modulated_norm
 
 
 class NamedLinear(torch.nn.Module):
@@ -43,6 +43,7 @@ class MLP(torch.nn.Module):
         dim_aux=None,
         norm_eps=1e-5,
         name: str | None = None,
+        dim_modulation=None,
     ):
         """Constructor"""
 
@@ -54,7 +55,10 @@ class MLP(torch.nn.Module):
         assert num_layers >= 2
 
         self.with_residual = with_residual
-        self.with_aux = dim_aux is not None
+        self.with_aux = dim_aux is not None or dim_modulation is not None
+        assert dim_modulation is None or (pre_layer_norm and dim_aux is None), (
+            "dim_modulation modulates the pre-layer norm and excludes dim_aux"
+        )
         dim_hidden = int(dim_in * hidden_factor)
 
         self.layers = torch.nn.ModuleList()
@@ -67,6 +71,8 @@ class MLP(torch.nn.Module):
                 if dim_aux is None
                 else AdaLayerNorm(dim_in, dim_aux, norm_eps=norm_eps)
             )
+            if dim_modulation is not None:
+                self.layers[0] = modulated_norm(self.layers[0], dim_modulation)
 
         self.layers.append(torch.nn.Linear(dim_in, dim_hidden))
         self.layers.append(nonlin())

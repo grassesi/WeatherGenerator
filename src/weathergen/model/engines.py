@@ -29,6 +29,7 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
+from weathergen.model.norms import ZeroLinear
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
@@ -549,12 +550,21 @@ class IdentityEngine(torch.nn.Module):
 class ForecastingEngine(torch.nn.Module):
     name: "ForecastingEngine"
 
-    def __init__(self, cf: Config, mode_cfg, num_healpix_cells: int, dim_aux: int = None) -> None:
+    def __init__(
+        self,
+        cf: Config,
+        mode_cfg,
+        num_healpix_cells: int,
+        dim_aux: int = None,
+        dim_modulation: int | None = None,
+    ) -> None:
         """
         Initialize the ForecastingEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
         :param num_healpix_cells: Number of healpix cells used for local queries.
+        :param dim_modulation: Width of a per-token forecast conditioning; when set, every block's
+            pre-norm is a zero-initialised modulated norm driven by `forward`'s `aux`.
         """
         super(ForecastingEngine, self).__init__()
         self.cf = cf
@@ -579,6 +589,7 @@ class ForecastingEngine(torch.nn.Module):
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                             with_2d_rope=self.cf.get("rope_2D", False),
+                            dim_modulation=dim_modulation,
                         )
                     )
                 else:
@@ -597,6 +608,7 @@ class ForecastingEngine(torch.nn.Module):
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                             with_2d_rope=self.cf.get("rope_2D", False),
+                            dim_modulation=dim_modulation,
                         )
                     )
                 # Add MLP block
@@ -609,6 +621,7 @@ class ForecastingEngine(torch.nn.Module):
                         norm_type=self.cf.norm_type,
                         dim_aux=dim_aux,
                         norm_eps=self.cf.mlp_norm_eps,
+                        dim_modulation=dim_modulation,
                     )
                 )
                 # Optionally, add LayerNorm after i-th layer
@@ -618,7 +631,8 @@ class ForecastingEngine(torch.nn.Module):
                     )
 
         def init_weights_final(m):
-            if isinstance(m, torch.nn.Linear):
+            # the conditioning modulation starts at exactly zero, not near it
+            if isinstance(m, torch.nn.Linear) and not isinstance(m, ZeroLinear):
                 torch.nn.init.normal_(m.weight, mean=0, std=0.001)
                 if m.bias is not None:
                     torch.nn.init.normal_(m.bias, mean=0, std=0.001)
@@ -626,14 +640,16 @@ class ForecastingEngine(torch.nn.Module):
         for block in self.fe_blocks:
             block.apply(init_weights_final)
 
-    def forward(self, tokens, fstep, coords=None):
+    def forward(self, tokens, fstep, coords=None, aux=None):
         if self.training:
             # Impute noise to the latent state
             noise_std = self.cf.get("fe_impute_latent_noise_std", 0.0)
             if noise_std > 0.0:
                 tokens = tokens + torch.randn_like(tokens) * torch.norm(tokens) * noise_std
 
-        aux_info = None
+        # per-token forecast conditioning; passed explicitly through the checkpoint so the
+        # backward recompute sees this step's conditioning
+        aux_info = aux
         for _b_idx, block in enumerate(self.fe_blocks):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
                 tokens = checkpoint(block, tokens, use_reentrant=False)

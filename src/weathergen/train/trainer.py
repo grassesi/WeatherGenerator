@@ -259,6 +259,22 @@ class Trainer(TrainerBase):
             denormalize_data_fct=denormalize_data_fct,
         )
 
+    @staticmethod
+    def _forcing_input(dataset: MultiStreamDataSampler, stage, mode_cfg) -> ForcingInput:
+        """The dynamic forcing streams of `dataset`, read on its own timeline."""
+        forcing_streams = {
+            name: stream.readers
+            for name, stream in dataset.streams_datasets.items()
+            if stream.info.get("is_dynamic_forcing", False)
+        }
+        return ForcingInput(
+            stage,
+            dataset.time_window_handler,
+            forcing_streams,
+            dataset.tokenizer,
+            mode_cfg.get("forecast", {}).get("offset", 1),
+        )
+
     def step_chunk(self, forecast_chunk, chunk) -> ModelOutput:
         """Advance the rollout by one chunk of forecast steps.
 
@@ -385,18 +401,7 @@ class Trainer(TrainerBase):
             stage=VAL,
         )
         self.dataset_val = self.dataset
-        forcing_streams = {
-            name: stream.readers
-            for name, stream in self.dataset.streams_datasets.items()
-            if stream.info.get("is_dynamic_forcing", False)
-        }
-        self.dynamic_forcings = ForcingInput(
-            VAL,
-            self.dataset.time_window_handler,
-            forcing_streams,
-            self.dataset_val.tokenizer,
-            self.test_cfg.get("forecast", {}).get("offset", 1),
-        )
+        self.dynamic_forcings = self._forcing_input(self.dataset, VAL, self.test_cfg)
 
         # make sure number of loaders does not exceed requested samples
         loader_num_workers = min(self.test_cfg.samples_per_mini_epoch, cf.data_loading.num_workers)
@@ -445,6 +450,9 @@ class Trainer(TrainerBase):
         # create data loaders
         self.dataset = MultiStreamDataSampler(cf, self.training_cfg, stage=TRAIN)
         self.dataset_val = MultiStreamDataSampler(cf, self.validation_cfg, stage=VAL)
+        # validation reads its forcing on the validation dataset's timeline and readers; the
+        # training loop builds its own from the training dataset in `train`
+        self.dynamic_forcings = self._forcing_input(self.dataset_val, VAL, self.validation_cfg)
 
         loader_params = {
             "batch_size": None,
@@ -622,18 +630,7 @@ class Trainer(TrainerBase):
 
         self.optimizer.zero_grad()
 
-        forcing_streams = {
-            name: stream.readers
-            for name, stream in self.dataset.streams_datasets.items()
-            if stream.info.get("is_dynamic_forcing", False)
-        }
-        self.dynamic_forcings = ForcingInput(
-            TRAIN,
-            self.dataset.time_window_handler,
-            forcing_streams,
-            self.dataset.tokenizer,
-            self.training_cfg.get("forecast", {}).get("offset", 1),
-        )
+        dynamic_forcings_train = self._forcing_input(self.dataset, TRAIN, self.training_cfg)
 
         # training loop
         self.t_start = time.time()
@@ -662,7 +659,7 @@ class Trainer(TrainerBase):
                         handler,
                         step_stride,
                     ),
-                    self.dynamic_forcings,
+                    dynamic_forcings_train,
                 )
 
                 targets_and_auxs = {}

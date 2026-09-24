@@ -28,6 +28,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadVarlen,
 )
 from weathergen.model.forcing import ForcedModel
+from weathergen.model.forecast_conditioning import check_conditioning_keys, conditioning_method
 from weathergen.model.layers import MLP
 from weathergen.model.model import ModelParams
 from weathergen.model.utils import apply_fct_to_blocks, freeze_weights
@@ -114,7 +115,7 @@ def init_model_and_shard(
                 fully_shard(module, reshard_after_forward=False, **fsdp_kwargs)
 
         if isinstance(model, ForcedModel):
-            for module in model.forcing_engine.blocks.modules():
+            for module in model.forcing_engine.fsdp_modules():
                 if isinstance(module, modules_to_shard):
                     fully_shard(module, **fsdp_kwargs)
 
@@ -192,6 +193,8 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
     params = torch.load(
         path_run / filename, map_location=torch.device("cpu"), mmap=True, weights_only=True
     )
+    # a checkpoint of one forecast conditioning is never loaded as another
+    check_conditioning_keys(conditioning_method(cf), params.keys())
 
     is_model_sharded = cf.with_ddp and cf.with_fsdp
     if is_model_sharded:
@@ -276,8 +279,16 @@ def get_model(cf: Config, training_mode: TrainingMode, dataset, overrides):
     sources_size = dataset.get_sources_size()
     targets_num_channels = dataset.get_targets_num_channels()
     targets_coords_size = dataset.get_targets_coords_size()
+    # per stream, for a forecast conditioning that consumes the forcing's raw channels
+    forcing_num_channels = dict(
+        zip(dataset.streams_datasets.keys(), dataset.get_sources_num_channels(), strict=True)
+    )
 
     cf_with_overrides = merge_configs(cf, overrides)
     return ForcedModel(
-        cf_with_overrides, sources_size, targets_num_channels, targets_coords_size
+        cf_with_overrides,
+        sources_size,
+        targets_num_channels,
+        targets_coords_size,
+        forcing_num_channels,
     ).create()

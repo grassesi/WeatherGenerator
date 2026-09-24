@@ -93,6 +93,82 @@ def modulate(x, shift, scale):
     return x * (1 + scale) + shift
 
 
+class ZeroLinear(nn.Linear):
+    """
+    Bias-free Linear whose every (re)initialisation is exactly zero.
+
+    Zero is restored by `reset_parameters`, so it survives the paths that re-initialise a built
+    model: `Model.reset_parameters` after an FSDP `to_empty()`, and `load_model`'s reset of
+    modules missing from a checkpoint. Without a bias, a zero input maps to exactly zero.
+    """
+
+    def __init__(self, in_features: int, out_features: int, name: str | None = None):
+        super().__init__(in_features, out_features, bias=False)
+        if name is not None:
+            self.name = name
+
+    def reset_parameters(self) -> None:
+        nn.init.zeros_(self.weight)
+
+
+def _modulate_normed(x: torch.Tensor, modulation: nn.Linear, aux: torch.Tensor | None):
+    """DiT-style shift/scale of an already normalized `x` by a per-token conditioning `aux`."""
+    if aux is None:
+        return x
+    shift, scale = modulation(aux.to(modulation.weight.dtype)).to(x.dtype).chunk(2, dim=-1)
+    return x * (1 + scale) + shift
+
+
+class ModulatedLayerNorm(nn.LayerNorm):
+    """
+    LayerNorm followed by a zero-initialised, conditioning-dependent shift and scale.
+
+    A subclass rather than a wrapper, so the norm's own parameters keep their state-dict keys;
+    only `modulation.weight` is added. At zero modulation the output is the plain LayerNorm.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        dim_cond: int,
+        eps: float = 1e-5,
+        elementwise_affine: bool = True,
+        bias: bool = True,
+    ):
+        super().__init__(dim, eps=eps, elementwise_affine=elementwise_affine, bias=bias)
+        self.modulation = ZeroLinear(dim_cond, 2 * dim, name="forecast_conditioning_modulation")
+
+    def forward(self, x: torch.Tensor, aux: torch.Tensor | None = None) -> torch.Tensor:
+        return _modulate_normed(super().forward(x), self.modulation, aux)
+
+
+class ModulatedRMSNorm(RMSNorm):
+    """RMSNorm counterpart of `ModulatedLayerNorm`."""
+
+    def __init__(self, dim: int, dim_cond: int, eps: float = 1e-6):
+        super().__init__(dim, eps=eps)
+        self.modulation = ZeroLinear(dim_cond, 2 * dim, name="forecast_conditioning_modulation")
+
+    def forward(self, x: torch.Tensor, aux: torch.Tensor | None = None) -> torch.Tensor:
+        return _modulate_normed(super().forward(x), self.modulation, aux)
+
+
+def modulated_norm(norm: nn.Module, dim_cond: int) -> nn.Module:
+    """The modulated counterpart of a built LayerNorm/RMSNorm, with the same configuration."""
+    if isinstance(norm, nn.LayerNorm):
+        (dim,) = norm.normalized_shape
+        return ModulatedLayerNorm(
+            dim,
+            dim_cond,
+            eps=norm.eps,
+            elementwise_affine=norm.elementwise_affine,
+            bias=norm.bias is not None,
+        )
+    if isinstance(norm, RMSNorm):
+        return ModulatedRMSNorm(norm.weight.shape[0], dim_cond, eps=norm.eps)
+    raise TypeError(f"Cannot modulate a {type(norm).__name__}; expected LayerNorm or RMSNorm.")
+
+
 class SwiGLU(nn.Module):
     def __init__(self):
         super(SwiGLU, self).__init__()

@@ -61,16 +61,29 @@ def _reader_stack(reader: DataReaderBase) -> list[DataReaderBase]:
     return stack
 
 
-def _ffe_param_count(engine) -> int:
-    """Parameters in a forcing engine's blocks, counted regardless of requires_grad.
+def _conditioning_parameters(engine, model) -> list:
+    """Every parameter of a model's forecast conditioning, wherever in the model it lives.
+
+    A `ForecastConditioning` names its own parameters -- the AdaLN one keeps its modulation
+    inside the forecast engine; anything else is read the way the cross-attention engine
+    always was, through `.blocks`.
+    """
+    if engine is None:
+        return []
+    conditioning_parameters = getattr(engine, "conditioning_parameters", None)
+    if conditioning_parameters is not None:
+        return list(conditioning_parameters(model))
+    return list(engine.blocks.parameters())
+
+
+def _ffe_param_count(engine, model=None) -> int:
+    """Parameters in a forcing engine, counted regardless of requires_grad.
 
     `get_num_parameters` filters on requires_grad, which an inference run may have switched
     off, and a trained engine reading as empty would fail the identity check below for the
     wrong reason.
     """
-    if engine is None:
-        return 0
-    return sum(p.numel() for p in engine.blocks.parameters())
+    return sum(p.numel() for p in _conditioning_parameters(engine, model))
 
 
 def _ffe_weight_spread(engine) -> float | None:
@@ -879,7 +892,7 @@ class Coupler:
             )
             model = _unwrap_model(self.trainer(consumer).model)
             engine = getattr(model, "forcing_engine", None)
-            num_params = _ffe_param_count(engine)
+            num_params = _ffe_param_count(engine, model)
 
             if num_params == 0:
                 msg = (
@@ -890,6 +903,22 @@ class Coupler:
                     "trained with ffe_num_blocks > 0 as the consumer."
                 )
                 raise ValueError(msg)
+
+            # the weight-spread test below is specific to the cross-attention engine's 0.001
+            # init; another forecast conditioning says itself whether it looks untrained
+            method = getattr(engine, "method", "cross_attention")
+            if method != "cross_attention":
+                reason = engine.untrained_reason(model)
+                logger.info(
+                    f"{where}: forecast conditioning '{method}' has {num_params} parameters."
+                )
+                if reason is not None:
+                    logger.error(
+                        f"{where}, but its '{method}' forecast conditioning looks untrained: "
+                        f"{reason}. Check that the checkpoint really trained it before trusting "
+                        "this run."
+                    )
+                continue
 
             std = _ffe_weight_spread(engine)
             if std is None:
@@ -926,7 +955,7 @@ class Coupler:
             ccf = self.config(name)
             model = _unwrap_model(self.trainer(name).model)
             engine = getattr(model, "forcing_engine", None)
-            ffe_params = _ffe_param_count(engine)
+            ffe_params = _ffe_param_count(engine, model)
 
             size = mtime = "unknown"
             if checkpoint is not None:
