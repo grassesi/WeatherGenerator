@@ -14,6 +14,7 @@ import logging
 
 import torch
 from torch.distributed.fsdp import (
+    FSDPModule,
     MixedPrecisionPolicy,
     fully_shard,
 )
@@ -40,6 +41,31 @@ logger = logging.getLogger(__name__)
 
 # same as in config: student_teacher, forecasting, masking
 type TrainingMode = str
+
+
+def _unshard_before_forward(module: FSDPModule, args) -> None:
+    module.unshard()
+
+
+def unshard_in_nested_recompute(model: torch.nn.Module) -> None:
+    """
+    Make every sharded submodule of `model` unshard itself before its forward if FSDP did not.
+
+    FSDP2 skips its pre-forward unshard while a module is in its pre-backward state, which lasts
+    until the whole backward ends, assuming the pre-backward hook already unsharded it. A nested
+    checkpoint recompute breaks that assumption when a module runs more than once per iteration:
+    the encoder's outer checkpoints (`EncoderModule.forward`) re-run their FSDP-sharded blocks
+    during backward, and cross-attention forcing calls the encoder once per rollout step, so the
+    recompute for an earlier call finds the blocks resharded by a later call's post-backward and
+    multiplies sharded DTensor weights with plain tensors.
+
+    FSDP's own hook runs first (it is prepended), so everywhere else this is a no-op: `unshard`
+    returns early on an unsharded or pre-backward parameter group. The call's own post-backward
+    reshards afterwards.
+    """
+    for module in model.modules():
+        if isinstance(module, FSDPModule) and module is not model:
+            module.register_forward_pre_hook(_unshard_before_forward)
 
 
 def init_model_and_shard(
@@ -140,6 +166,7 @@ def init_model_and_shard(
 
     if with_ddp and with_fsdp:
         fully_shard(model)
+        unshard_in_nested_recompute(model)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
