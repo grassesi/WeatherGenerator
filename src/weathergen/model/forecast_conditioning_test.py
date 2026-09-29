@@ -231,7 +231,7 @@ FORCED_STREAM = {"S": {"is_dynamic_forcing": True, "train_source_channels": ["ss
 def test_a_config_without_the_block_is_the_cross_attention_engine():
     engine = build_forecast_conditioning(_cf(FORCED_STREAM))
     assert isinstance(engine, ForcingEngine)
-    assert engine.fe_modulation_dim is None
+    assert engine.fe_modulation_dim is None and engine.time is None
 
 
 def test_adaln_is_selected_and_sized_from_the_forcing_channels():
@@ -268,6 +268,24 @@ def test_checkpoints_of_the_two_methods_are_not_interchangeable():
         check_conditioning_keys("cross_attention", ADALN_KEYS)
     # the DiT decoder blocks' own zero-init modulation is not AdaLN conditioning
     check_conditioning_keys("cross_attention", ["decoder.0.adaLN_modulation.1.weight"])
+
+
+TIME_KEYS = [
+    "forcing_engine.time.mlp.0.weight",
+    "forecast_engine.fe_blocks.0.lnorm.modulation.weight",
+]
+
+
+def test_the_time_path_is_shared_and_only_the_forcing_path_identifies_a_method():
+    xattn_time_keys = XATTN_KEYS + TIME_KEYS
+    check_conditioning_keys("cross_attention", xattn_time_keys)
+    with pytest.raises(ValueError, match="trained with forecast conditioning 'cross_attention'"):
+        check_conditioning_keys("adaln", xattn_time_keys)
+    with pytest.raises(ValueError, match="trained with forecast conditioning 'adaln'"):
+        check_conditioning_keys("cross_attention", ADALN_KEYS + TIME_KEYS)
+    # time-only AdaLN is cross-attention with time and without its blocks
+    check_conditioning_keys("adaln", TIME_KEYS)
+    check_conditioning_keys("cross_attention", TIME_KEYS)
 
 
 ####################################################################################################
@@ -389,3 +407,99 @@ def test_time_reaches_every_token_and_adds_to_the_forcing():
 
     _, aux_time_only = cond(tokens, (None, time))
     torch.testing.assert_close(aux_time_only, time.unsqueeze(1).expand_as(aux_time_only))
+
+
+####################################################################################################
+# time conditioning of the cross-attention engine
+
+TIME_BLOCK = {"transform": "cos_sin", "variables": ["start_day", "start_time"]}
+
+
+def _xattn_cf(streams, conditioning=None, ffe_num_blocks=1):
+    """A config that can build real cross-attention blocks, small enough for the CPU."""
+    cf = _cf(streams, conditioning, ffe_num_blocks)
+    cf.update(
+        {
+            "ae_global_dim_embed": 8,
+            "fe_num_heads": 2,
+            "ae_adapter_dropout_rate": 0.0,
+            "with_flash_attention": True,  # only built, never run
+            "norm_type": "LayerNorm",
+            "norm_eps": 1e-5,
+            "mlp_norm_eps": 1e-5,
+            "attention_dtype": "fp32",
+        }
+    )
+    return cf
+
+
+def test_cross_attention_without_time_leaves_the_forecast_engine_unconditioned():
+    engine = ForcingEngine(_cf(FORCED_STREAM), n_blocks=0)
+    latent = torch.randn(2, 5, 4)
+
+    out, aux = engine(latent, (torch.randn(2, 3, 4), None))
+
+    # no blocks: the cross-attention is the identity
+    torch.testing.assert_close(out, latent)
+    assert aux is None
+
+
+def test_cross_attention_time_conditions_every_token_like_adaln():
+    conditioning = {"dim_cond": 8, "hidden_factor": 1, "time": TIME_BLOCK}
+    engine = build_forecast_conditioning(_xattn_cf(FORCED_STREAM, conditioning))
+    assert isinstance(engine, ForcingEngine) and len(engine.blocks) == 2
+    assert engine.fe_modulation_dim == 8 and engine.time.num_features == 4
+
+    # the same block builds the same time path under AdaLN
+    adaln = build_forecast_conditioning(
+        _cf(FORCED_STREAM, {**conditioning, "type": "adaln"}), {"S": 1}
+    )
+    assert adaln.fe_modulation_dim == engine.fe_modulation_dim
+    assert adaln.time.state_dict().keys() == engine.time.state_dict().keys()
+    assert [p.shape for p in adaln.time.parameters()] == [p.shape for p in engine.time.parameters()]
+
+    # the aux the forecast engine gets: time on every token, register/class tokens included
+    no_blocks = ForcingEngine(_cf(FORCED_STREAM), n_blocks=0, time=TIME_BLOCK, dim_cond=8)
+    latent = torch.randn(2, 5, 4)
+    time = torch.randn(2, 8)
+    out, aux = no_blocks(latent, (torch.randn(2, 3, 4), time))
+    torch.testing.assert_close(out, latent)
+    torch.testing.assert_close(aux, time.unsqueeze(1).expand(2, 5, 8))
+
+
+@pytest.mark.parametrize(
+    "streams, ffe_num_blocks", [({}, 1), (FORCED_STREAM, 0)], ids=["no-stream", "no-blocks"]
+)
+def test_cross_attention_time_needs_a_forcing_that_reaches_the_latent(streams, ffe_num_blocks):
+    with pytest.raises(ValueError, match="use forecast_conditioning.type: adaln"):
+        build_forecast_conditioning(_xattn_cf(streams, {"time": TIME_BLOCK}, ffe_num_blocks))
+
+
+def test_cross_attention_time_counts_and_needs_the_forecast_engine_modulation():
+    import types
+
+    engine = build_forecast_conditioning(
+        _xattn_cf(FORCED_STREAM, {"dim_cond": 8, "time": TIME_BLOCK})
+    )
+
+    without_blocks = types.SimpleNamespace(forecast_engine=torch.nn.Sequential())
+    with pytest.raises(ValueError, match="cross_attention modulates the forecast engine"):
+        engine.check_model(without_blocks)
+
+    norm = ModulatedLayerNorm(4, 8)
+    with_blocks = types.SimpleNamespace(forecast_engine=torch.nn.Sequential(norm))
+    engine.check_model(with_blocks)
+    params = {id(p) for p in engine.conditioning_parameters(with_blocks)}
+    assert id(norm.modulation.weight) in params
+    assert {id(p) for p in engine.time.parameters()} <= params
+    assert {id(p) for p in engine.blocks.parameters()} <= params
+    fsdp_modules = set(engine.fsdp_modules())
+    assert set(engine.time.modules()) <= fsdp_modules
+    assert set(engine.blocks.modules()) <= fsdp_modules
+
+    # without time the forecast engine is not part of the conditioning
+    plain = build_forecast_conditioning(_xattn_cf(FORCED_STREAM))
+    plain.check_model(without_blocks)
+    assert {id(p) for p in plain.conditioning_parameters(with_blocks)} == {
+        id(p) for p in plain.blocks.parameters()
+    }

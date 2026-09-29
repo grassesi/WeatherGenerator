@@ -37,7 +37,10 @@ from weathergen.model.attention import MultiCrossAttentionHeadVarlen
 from weathergen.model.chunking import ChunkInfo
 from weathergen.model.forecast_conditioning import (
     ForecastConditioning,
+    TimeConditioning,
+    broadcast_time,
     build_forecast_conditioning,
+    dynamic_forcing_streams,
     register,
 )
 from weathergen.model.layers import MLP
@@ -449,6 +452,11 @@ class ForcingEngine(ForecastConditioning):
 
     The forcing streams must be encoder inputs: `get_data` tokenizes them under the sample's own
     source masks, so a diagnostic stream would be encoded as nothing.
+
+    With a `forecast_conditioning.time` block, the step's valid time conditions the forecast
+    engine exactly as in `AdaLNConditioning`: broadcast to every latent token, it drives the
+    zero-initialised modulation of every forecast-engine block's pre-norm. The cross-attention
+    to the forcing is unchanged, so the two methods then differ only in how the forcing enters.
     """
 
     method = "cross_attention"
@@ -467,11 +475,41 @@ class ForcingEngine(ForecastConditioning):
                     "with nothing. Make it a source stream, or use forecast_conditioning.type: "
                     "adaln, which does not need the encoder."
                 )
-        return cls(cf, cf.get("ffe_num_blocks", 0))
 
-    def __init__(self, cf: Config, n_blocks=1):
+        ccf = cf.get("forecast_conditioning", None) or {}
+        time = ccf.get("time", None)
+        n_blocks = cf.get("ffe_num_blocks", 0)
+        # time-only would hide a forcing that is discarded: its parameters would pass the
+        # coupler's "zero-block engine is the identity" check
+        if time and (not dynamic_forcing_streams(cf) or n_blocks == 0):
+            raise ValueError(
+                "forecast_conditioning.time with cross-attention needs a stream with "
+                f"is_dynamic_forcing: true and ffe_num_blocks > 0 (got {n_blocks}), or the "
+                "forcing is discarded; use forecast_conditioning.type: adaln for time-only "
+                "conditioning."
+            )
+        return cls(
+            cf,
+            n_blocks,
+            time=time,
+            dim_cond=ccf.get("dim_cond", 256),
+            hidden_factor=ccf.get("hidden_factor", 2),
+        )
+
+    def __init__(
+        self,
+        cf: Config,
+        n_blocks=1,
+        time: dict | None = None,
+        dim_cond: int = 256,
+        hidden_factor: int = 2,
+    ):
         super().__init__()
         self.cf = cf
+
+        # the step's valid time, conditioning the forecast engine as in AdaLNConditioning
+        self.time = TimeConditioning.from_config(time, dim_cond, hidden_factor)
+        self.fe_modulation_dim = dim_cond if self.time is not None else None
 
         blocks = []
         for _ in range(n_blocks):
@@ -519,21 +557,31 @@ class ForcingEngine(ForecastConditioning):
         ]
 
     def encode(self, model, model_params, forcings, sampling_idxs, source_masks, device):
-        """Tokenize the forcing and re-embed it with the model's own encoder."""
+        """``(forcing tokens re-embedded by the model's own encoder, time [B, dim] | None)``."""
         forcing_batch = forcings.get_data(sampling_idxs, source_masks)
         forcing_batch = forcing_batch.to_device(device)
         forcing_tokens, _ = model.encoder(model_params, forcing_batch)
-        return forcing_tokens
+        time = self.time(forcings, sampling_idxs, device) if self.time is not None else None
+        return forcing_tokens, time
 
     def fsdp_modules(self) -> Iterable[torch.nn.Module]:
-        return self.blocks.modules()
+        yield from self.blocks.modules()
+        if self.time is not None:
+            yield from self.time.modules()
 
     def conditioning_parameters(self, model) -> Iterator[torch.nn.Parameter]:
-        return self.blocks.parameters()
+        yield from self.blocks.parameters()
+        if self.time is not None:
+            yield from self.time.parameters()
+            for modulation in self._modulations(model):
+                yield from modulation.parameters()
 
-    def forward(self, latent_tokens, forcing_tokens):
-        """Cross-attend the latent to the forcing tokens; the forecast engine gets no `aux`."""
-        return self._cross_attend(latent_tokens, forcing_tokens), None
+    def forward(self, latent_tokens, encoded):
+        """Cross-attend the latent to the forcing; the forecast engine's `aux` is the time."""
+        forcing_tokens, time = encoded
+        latent_tokens = self._cross_attend(latent_tokens, forcing_tokens)
+        aux = broadcast_time(time, latent_tokens.shape[1]) if time is not None else None
+        return latent_tokens, aux
 
     def _cross_attend(self, latent_tokens, forcing_tokens):
         # MultiCrossAttentionHeadVarlen expects flattened varlen tokens + lens vectors.

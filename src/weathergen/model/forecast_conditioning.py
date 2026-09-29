@@ -19,7 +19,13 @@ through the component's `ForcingInput`, so the per-stream lag, a coupled produce
 The implementation is chosen by `forecast_conditioning.type` in the config; a config without
 the block is the reembed + cross-attention `ForcingEngine` (`forcing.py`) sized by
 `ffe_num_blocks`, i.e. exactly the model every existing checkpoint was trained as. The methods
-are not interchangeable: `load_model` refuses a checkpoint carrying another method's weights.
+differ in how the forcing enters and are not interchangeable: `load_model` refuses a checkpoint
+carrying another method's forcing weights.
+
+Both methods take the same optional `forecast_conditioning.time` block: the predicted window's
+time (`TimeConditioning`) is broadcast to every latent token and modulates every
+forecast-engine block's pre-norm. The time path is identical in both, so its weights do not
+identify a method.
 
 `AdaLNConditioning` is a port of the `adaln_local` mode of `ForcingInjection`
 (ankitpatnala/WeatherGenerator, branch develop-hclimrep_forcings): the forcing point cloud is
@@ -100,8 +106,18 @@ class ForecastConditioning(nn.Module, ABC):
     ) -> ForecastConditioning:
         """Build from the model config and the source channel count of each forcing stream."""
 
-    def check_model(self, model: Model) -> None:  # noqa: B027
+    def check_model(self, model: Model) -> None:
         """Raise if the built model cannot carry this conditioning. Called after `create`."""
+        if self.fe_modulation_dim is not None and not self._modulations(model):
+            raise ValueError(
+                f"forecast_conditioning.type: {self.method} modulates the forecast engine's "
+                "norms, but the forecast engine has no blocks (fe_num_blocks: 0 or no "
+                "forecast.policy), so the conditioning would have no effect."
+            )
+
+    def _modulations(self, model: Model) -> list[ZeroLinear]:
+        """The forecast engine's modulations, driven by this conditioning's `aux`."""
+        return [m for m in model.forecast_engine.modules() if isinstance(m, ZeroLinear)]
 
     def is_active(self, forcings: ForcingInput) -> bool:
         """Whether a rollout step is conditioned at all; by default, when there is a forcing."""
@@ -283,6 +299,12 @@ class ForcingEmbed(nn.Module):
 ####################################################################################################
 # time conditioning
 
+
+def broadcast_time(time: torch.Tensor, num_tokens: int) -> torch.Tensor:
+    """``[B, dim]`` -> ``[B, num_tokens, dim]``: time is global, every token sees it."""
+    return time.unsqueeze(1).expand(time.shape[0], num_tokens, time.shape[-1])
+
+
 # period of each time variable, in the unit its raw value is given in
 TIME_PERIODS = {"start_day": 365.0, "end_day": 365.0, "start_time": 24.0, "end_time": 24.0}
 TIME_TRANSFORMS = ("absolute", "absolute_normalized", "cos_sin", "fourier")
@@ -433,7 +455,8 @@ class AdaLNConditioning(ForecastConditioning):
     """
 
     method = "adaln"
-    state_key_pattern = re.compile(r"forcing_engine\.(embed|pools|time)\.|\.modulation\.weight$")
+    # only the forcing path: the time MLP and the FE modulation are shared with cross-attention
+    state_key_pattern = re.compile(r"forcing_engine\.(embed|pools)\.")
 
     def __init__(
         self,
@@ -515,14 +538,6 @@ class AdaLNConditioning(ForecastConditioning):
             time=ccf.get("time", None),
         )
 
-    def check_model(self, model: Model) -> None:
-        if not any(isinstance(m, ZeroLinear) for m in model.forecast_engine.modules()):
-            raise ValueError(
-                "forecast_conditioning.type: adaln modulates the forecast engine's norms, but the "
-                "forecast engine has no blocks (fe_num_blocks: 0 or no forecast.policy), so the "
-                "forcing would have no effect."
-            )
-
     def _cell_idx(self, stream: str, coords: NDArray, device) -> torch.Tensor:
         coords = np.ascontiguousarray(coords)
         # keyed by the grid itself, so a different grid (e.g. a spoof) gets its own entry
@@ -597,16 +612,13 @@ class AdaLNConditioning(ForecastConditioning):
             cond = torch.cat([cond_aux, cond_cells], dim=1)
         if time is not None:
             # global: every token, register/class tokens included, sees the step's time
-            time = time.unsqueeze(1).expand(batch_size, num_tokens, time.shape[-1])
+            time = broadcast_time(time, num_tokens)
             cond = time if cond is None else cond + time
         return tokens, cond
 
     def fsdp_modules(self) -> Iterable[nn.Module]:
         modules = [m for m in (self.embed, self.pools, self.time) if m is not None]
         return (m for module in modules for m in module.modules())
-
-    def _modulations(self, model: Model) -> list[ZeroLinear]:
-        return [m for m in model.forecast_engine.modules() if isinstance(m, ZeroLinear)]
 
     def conditioning_parameters(self, model: Model) -> Iterator[nn.Parameter]:
         yield from self.parameters()
