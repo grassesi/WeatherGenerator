@@ -1031,15 +1031,23 @@ SCHEME_CHUNK = H24
 SCHEME_INIT = np.datetime64("2023-01-02T00:00")
 
 
-def _replay(consumer_step, producer_step, lag, *, producer_first, num_chunks=2):
+def _replay(consumer_step, producer_step, lag, *, producer_first, num_chunks=2, aligned=False):
     """Drive one direction of the exchange through the real dispatch order.
 
     Returns one row per request: the time predicted, the source valid times served, and how
     many of that request's source windows were unresolved.
+
+    `aligned` builds both timelines with `align_first_prediction`, as a coupled run with
+    `rollout.align_first_prediction` does: each side is initialised one of its own steps before
+    `SCHEME_INIT`, so both predict their first window from `SCHEME_INIT`.
     """
 
-    c_h = handler(SCHEME_INIT, consumer_step)
-    p_h = handler(SCHEME_INIT, producer_step)
+    c_h = TimeWindowHandler(
+        SCHEME_INIT, END, consumer_step, consumer_step, align_first_prediction=aligned
+    )
+    p_h = TimeWindowHandler(
+        SCHEME_INIT, END, producer_step, producer_step, align_first_prediction=aligned
+    )
     per_p = int(SCHEME_CHUNK // producer_step)
     per_c = int(SCHEME_CHUNK // consumer_step)
 
@@ -1048,7 +1056,8 @@ def _replay(consumer_step, producer_step, lag, *, producer_first, num_chunks=2):
         STREAM,
         producer=StampedReader(p_h),
         request_handler=shifted(c_h, lag),
-        init_time=SCHEME_INIT,
+        # the producer's initialization window, which is what the Coupler pushes in
+        init_time=p_h.t_start,
     )
 
     rows = []
@@ -1056,13 +1065,13 @@ def _replay(consumer_step, producer_step, lag, *, producer_first, num_chunks=2):
         fsteps = list(range(i * per_p + 1, (i + 1) * per_p + 1))
 
         def dispatch(fsteps=fsteps, p_h=p_h):
-            reader.add_chunk(*build_chunk(p_h, SCHEME_INIT, _coords(), fsteps=fsteps))
+            reader.add_chunk(*build_chunk(p_h, p_h.t_start, _coords(), fsteps=fsteps))
 
         if producer_first:
             dispatch()
 
         for k in range(per_c):
-            target = SCHEME_INIT + (i * per_c + k + 1) * consumer_step
+            target = c_h.first_prediction_start + (i * per_c + k) * consumer_step
             before = reader.provenance.unresolved
             rdata = reader.get_source(idx_of(c_h, target))
             rows.append(
@@ -1155,6 +1164,39 @@ def test_a_single_pass_interleave_costs_one_chunk_of_round_trip_lag():
     assert ocean_min + atmo_min == SCHEME_CHUNK
     assert np.timedelta64(18, "h") + H6 == SCHEME_CHUNK, "DLESyM is exactly on the bound"
     assert np.timedelta64(12, "h") + np.timedelta64(3, "h") < SCHEME_CHUNK, "SamudrACE is inside"
+
+
+def test_aligned_first_predictions_let_the_ocean_read_its_own_day():
+    """With both sides predicting their first window from T, lag 0 resolves completely.
+
+    The atmosphere, stepped first, has emitted `A(T) .. A(T+18h)` by the time the ocean asks
+    for the day starting at `T`, so the ocean is forced with exactly its own prediction window.
+    """
+
+    rows = _replay(H24, H6, ZERO, producer_first=True, aligned=True)
+
+    assert [unresolved for _, _, unresolved in rows] == [0] * len(rows)
+    for target, times, _ in rows:
+        assert times == [target + k * H6 for k in range(4)], "the ocean's own day, all four"
+
+
+@pytest.mark.parametrize(("lag_hours", "resolves"), [(24, True), (18, False), (6, False)])
+def test_aligned_atmosphere_holds_the_previous_ocean_day(lag_hours, resolves):
+    """The other half: stepped after the atmosphere, the ocean's current day does not exist yet.
+
+    At 24 h every atmospheric step of a day is served the ocean's previous day; any shorter
+    lag reaches the ocean day being computed beside it and resolves to nothing.
+    """
+
+    rows = _replay(H6, H24, np.timedelta64(lag_hours, "h"), producer_first=False, aligned=True)
+
+    assert (sum(row[2] for row in rows) == 0) == resolves
+
+
+def test_aligning_moves_the_round_trip_lag_rather_than_shortening_it():
+    """0 h + 24 h is the same one-chunk round trip as DLESyM's 18 h + 6 h, split the other way."""
+
+    assert ZERO + H24 == np.timedelta64(18, "h") + H6 == SCHEME_CHUNK
 
 
 def test_the_reduced_forcing_is_stamped_at_the_window_start():

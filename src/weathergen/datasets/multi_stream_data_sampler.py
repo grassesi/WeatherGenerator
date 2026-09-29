@@ -50,6 +50,8 @@ FORECAST_DEFAULTS = {
     "time_step": np.timedelta64(0, "ms"),
     "policy": None,
     "num_steps": np.array([0], dtype=np.int32),
+    # start_date is the first predicted window, not the initialization window (TimeWindowHandler)
+    "align_first_prediction": False,
 }
 
 
@@ -169,12 +171,15 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         self.len_timedelta = mode_cfg.time_window_len
         self.step_timedelta = mode_cfg.time_window_step
-        tw = TimeWindowHandler(
-            self.mode_cfg.start_date,
-            self.mode_cfg.end_date,
-            self.len_timedelta,
-            self.step_timedelta,
-        )
+        align_first_prediction = bool(forecast_cfg["align_first_prediction"])
+        if align_first_prediction and self.time_step != self.step_timedelta:
+            msg = (
+                "forecast.align_first_prediction moves the timeline back by forecast.offset "
+                f"windows, which is forecast.offset forecast steps only when forecast.time_step "
+                f"({self.time_step}) equals time_window_step ({self.step_timedelta})."
+            )
+            raise ValueError(msg)
+        tw = TimeWindowHandler.from_stage_config(self.mode_cfg)
 
         self.time_window_handler = tw
         if is_root():

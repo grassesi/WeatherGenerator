@@ -284,15 +284,9 @@ def write_output(
 
     # write output
 
-    start_date = val_cfg.start_date
-    end_date = val_cfg.end_date
-
-    twh = TimeWindowHandler(
-        start_date,
-        end_date,
-        val_cfg.time_window_len,
-        val_cfg.time_window_step,
-    )
+    # the sampler's own timeline, so the source intervals written here are the windows the
+    # samples were actually drawn from
+    twh = TimeWindowHandler.from_stage_config(val_cfg)
     source_windows = (twh.window(idx) for idx in sample_idxs)
     source_intervals = [TimeRange(window.start, window.end) for window in source_windows]
 

@@ -424,6 +424,111 @@ def test_dates_offset_and_sample_count_come_from_the_rollout():
         assert cfg.output.num_samples == cfg.samples_per_mini_epoch
 
 
+# --------------------------------------------------------------------------------------
+# align_first_prediction: start_date as the first predicted window, coupled and standalone
+
+T = config.str_to_datetime64("2023-01-01T00:00")
+H6 = config.parse_timedelta("06:00:00")
+H24 = config.parse_timedelta("24:00:00")
+
+
+def standalone_test_cfg(window_step, *, align):
+    """What a user writes for a standalone inference run starting at T."""
+    cf = make_component_cf(window_step, window_step)
+    cf.test_config = {
+        "start_date": "${datetime:2023-01-01T00:00}",
+        "end_date": "${datetime:2023-12-31T00:00}",
+        "forecast": {"offset": 1, "align_first_prediction": align},
+    }
+    return resolve_stage_configs(cf)[2]
+
+
+@pytest.mark.parametrize("align", [False, True])
+def test_a_coupled_component_samples_the_timeline_a_standalone_run_would(align):
+    """Same start_date, same windows: the flag is pushed down, start_date is never rewritten."""
+
+    out = derive(
+        atmo_ocean_cfs(), ATMO_OCEAN, make_rollout(align_first_prediction=align)
+    )
+
+    for name, step in (("Atmo", "06:00:00"), ("Ocean", "24:00:00")):
+        assert out[name].start_date == T, "start_date reaches the component unshifted"
+        coupled = TimeWindowHandler.from_stage_config(out[name])
+        standalone = TimeWindowHandler.from_stage_config(standalone_test_cfg(step, align=align))
+        assert coupled.t_start == standalone.t_start
+        assert coupled.t_end == standalone.t_end
+        assert coupled.window(1) == standalone.window(1)
+
+
+def test_aligned_components_share_their_first_prediction_window():
+    out = derive(atmo_ocean_cfs(), ATMO_OCEAN, make_rollout(align_first_prediction=True))
+
+    atmo = TimeWindowHandler.from_stage_config(out["Atmo"])
+    ocean = TimeWindowHandler.from_stage_config(out["Ocean"])
+
+    assert atmo.t_start == T - H6
+    assert ocean.t_start == T - H24
+    assert atmo.first_prediction_start == ocean.first_prediction_start == T
+
+
+def test_alignment_is_off_by_default():
+    out = derive(atmo_ocean_cfs(), ATMO_OCEAN)
+
+    for cfg in out.values():
+        assert not cfg.forecast.align_first_prediction
+        assert TimeWindowHandler.from_stage_config(cfg).t_start == T
+
+
+ATMO_OCEAN_EXCHANGE = {
+    "atm": Coupling(name="atm", producer="Atmo", stream="ERA5", consumer="Ocean"),
+    "sst": Coupling(name="sst", producer="Ocean", stream="ERA5-Ocean", consumer="Atmo"),
+}
+
+
+class _Lags:
+    def __init__(self, lags):
+        self.lags = lags
+
+
+def check_lags(ocean_lag_hours, atmo_lag_hours, *, align):
+    """Run the setup-time lag check for the deployed pairing, the atmosphere stepped first."""
+    cfs = atmo_ocean_cfs()
+    coupler = Coupler(
+        {name: (None, cf) for name, cf in cfs.items()},
+        ATMO_OCEAN_EXCHANGE,
+        make_rollout(align_first_prediction=align),
+    )
+    coupler._check_couplings()
+    coupler._names = coupler._step_order()
+    assert coupler._names == ["Atmo", "Ocean"]
+    coupler._derive_component_configs()
+    coupler._pristine_forcings = {
+        "Ocean": _Lags({"ERA5": config.parse_timedelta(f"{ocean_lag_hours:02d}:00:00")}),
+        "Atmo": _Lags({"ERA5-Ocean": config.parse_timedelta(f"{atmo_lag_hours:02d}:00:00")}),
+    }
+    coupler._check_forcing_lags()
+
+
+@pytest.mark.parametrize(
+    ("ocean", "atmo", "align", "ok"),
+    [
+        (18, 6, False, True),  # DLESyM, on both bounds
+        (24, 6, False, True),  # generation 03
+        (12, 6, False, False),  # the ocean reaches atmospheric windows not yet emitted
+        (18, 3, False, False),
+        (0, 24, True, True),  # aligned: concurrent ocean forcing, previous-day SST
+        (0, 18, True, False),  # the last atmospheric step reaches the ocean day being computed
+        (18, 6, True, False),  # today's atmosphere checkpoints cannot run aligned
+    ],
+)
+def test_the_lag_bound_follows_the_first_prediction_stagger(ocean, atmo, align, ok):
+    if ok:
+        check_lags(ocean, atmo, align=align)
+    else:
+        with pytest.raises(ValueError, match="stagger"):
+            check_lags(ocean, atmo, align=align)
+
+
 def test_batch_size_is_forced_to_one():
     out = derive(atmo_ocean_cfs(), ATMO_OCEAN)
 

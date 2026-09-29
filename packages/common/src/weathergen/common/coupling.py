@@ -18,6 +18,7 @@ from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.coupling_reader import DataReaderCoupling
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
+    TimeWindowHandler,
     WrappedDataReader,
     rebase_innermost,
 )
@@ -194,6 +195,12 @@ class Rollout:
     # Chunks are the unit shared by every component regardless of its own cadence. 1 keeps the
     # previous behaviour: each batch's initialization is exactly one chunk after the last.
     init_stride_chunks: int = 1
+    # start_date is the start of every component's first predicted window rather than of its
+    # initialization window: each component's timeline moves back by forecast_offset of its own
+    # windows (TimeWindowHandler.align_first_prediction). Pushed down as a flag, never as a
+    # rewritten start_date, so a standalone run given the same start_date lands on the same
+    # windows.
+    align_first_prediction: bool = False
 
     @classmethod
     def from_config(cls, cfg) -> Rollout:
@@ -213,6 +220,7 @@ class Rollout:
             num_workers=int(cfg.get("num_workers", 0)),
             accumulate_chunks=bool(cfg.get("accumulate_chunks", False)),
             init_stride_chunks=int(cfg.get("init_stride_chunks", 1)),
+            align_first_prediction=bool(cfg.get("align_first_prediction", False)),
         )
 
         for key in ("num_chunks", "num_samples", "init_stride_chunks"):
@@ -467,11 +475,19 @@ class Coupler:
     def _check_forcing_lags(self) -> None:
         """Every source window a coupled request touches must exist when it is asked for.
 
-        With `len_c` the consumer's window length, `P` the producer's emission cadence and
-        `D` a whole chunk when the producer is stepped *after* the consumer, the lag must
-        satisfy `L >= len_c - P + D`. Below that the consumer reaches into a window its
-        producer has not emitted yet, which reads back as an absent forcing rather than as an
-        error (`forcing_lag_design.md` D4).
+        With `len_c` the consumer's window length, `P_c` its own emission cadence, `F` each
+        side's first predicted window start and `D` a whole chunk when the producer is stepped
+        *after* the consumer, the lag must satisfy `L >= (F_c - F_p) + len_c - P_c + D`: the
+        last window the consumer predicts in a chunk starts at `F_c + (i+1)C - P_c`, and its
+        lagged request must not reach past the producer's frontier `F_p + (j+1)C`. Below that
+        the consumer reaches into a window its producer has not emitted yet, which reads back
+        as an absent forcing rather than as an error (`forcing_lag_design.md` D4).
+
+        With every component initialised at `start_date` and `forecast_offset` 1,
+        `F_c - F_p = P_c - P_p` and this is `len_c - P_p + D`: 18 h for a 24 h ocean forced by a
+        6 h atmosphere stepped first, 6 h the other way. With `align_first_prediction` the
+        stagger vanishes and the bounds become 0 h and 24 h -- the same one-chunk round trip,
+        split the other way.
         """
 
         if self._rollout is None:
@@ -487,10 +503,13 @@ class Coupler:
 
             lag = forcings.lags[coupling.stream]
             len_c = self._window_len(coupling.consumer)
-            cadence = self._emission_cadence(coupling.producer)
+            cadence = self._emission_cadence(coupling.consumer)
+            stagger = self._first_prediction_start(
+                coupling.consumer
+            ) - self._first_prediction_start(coupling.producer)
             before = self._names.index(coupling.producer) < self._names.index(coupling.consumer)
             slack = _ZERO if before else self._rollout.chunk_length
-            required = len_c - cadence + slack
+            required = stagger + len_c - cadence + slack
 
             where = (
                 f"Coupling {coupling.name!r} ({coupling.producer!r} -> {coupling.consumer!r}, "
@@ -501,8 +520,9 @@ class Coupler:
                     f"{where} declares forcing_lag {timedelta_to_str(lag)}, but the producer is "
                     f"stepped {'before' if before else 'after'} the consumer, so a request "
                     "reaches windows that do not exist yet unless the lag is at least "
-                    f"{timedelta_to_str(required)} (consumer window {timedelta_to_str(len_c)} "
-                    f"- producer cadence {timedelta_to_str(cadence)} + "
+                    f"{timedelta_to_str(required)} (first-prediction stagger "
+                    f"{timedelta_to_str(stagger)} + consumer window {timedelta_to_str(len_c)} "
+                    f"- consumer cadence {timedelta_to_str(cadence)} + "
                     f"{timedelta_to_str(slack)})."
                 )
                 raise ValueError(msg)
@@ -528,6 +548,18 @@ class Coupler:
                 f"{where}: forcing_lag {timedelta_to_str(lag)}, at least "
                 f"{timedelta_to_str(required)} required."
             )
+
+    def _first_prediction_start(self, name: str) -> np.datetime64:
+        """Start of the component's first predicted window, off the timeline its sampler builds.
+
+        The timeline is `TimeWindowHandler.from_stage_config`, the one the sampler builds, so
+        the bound is checked against the windows the run will actually step through. The
+        offset is counted in forecast steps, which is where the first prediction lands whatever
+        the stride between windows.
+        """
+        _, _, test_cfg = resolve_stage_configs(self.config(name))
+        handler = TimeWindowHandler.from_stage_config(test_cfg)
+        return handler.t_start + handler.forecast_offset * self._emission_cadence(name)
 
     def _window_len(self, name: str) -> np.timedelta64:
         """The component's own time window length, as its test config resolves it."""
@@ -696,6 +728,7 @@ class Coupler:
                     # ranks would issue different numbers of collectives and FSDP would hang
                     "policy": "fixed",
                     "accumulate_chunks": rollout.accumulate_chunks,
+                    "align_first_prediction": rollout.align_first_prediction,
                 },
                 "output": {
                     "num_samples": rollout.num_samples,

@@ -79,6 +79,8 @@ class TimeWindowHandler:
         t_end: NPDT64,
         t_window_len_hours: NPTDel64,
         t_window_step_hours: NPTDel64,
+        align_first_prediction: bool = False,
+        forecast_offset: int = 1,
     ):
         """
         Parameters
@@ -91,22 +93,69 @@ class TimeWindowHandler:
             length of data window
         t_window_step :
             delta hours between start times of windows
+        align_first_prediction :
+            Read `start` as the start of the first *predicted* window rather than of the
+            initialization window, i.e. move the timeline `forecast_offset` windows earlier.
+            Components on different window steps then share their first prediction window, and
+            a standalone run lands on the same windows as a coupled one given the same `start`.
+            Only for handlers built from a configured `start_date`: a handler derived from an
+            already-resolved one (`shifted`, a sampling grid) must not shift again.
+        forecast_offset :
+            Windows between the initialization window and the first predicted one. Only read
+            when `align_first_prediction` is set.
 
         """
-        self.t_start: NPDT64 = t_start
-        self.t_end: NPDT64 = t_end
+        self.align_first_prediction: bool = bool(align_first_prediction)
+        self.forecast_offset: int = int(forecast_offset)
         self.t_window_len: NPTDel64 = t_window_len_hours
         self.t_window_step: NPTDel64 = t_window_step_hours
+        shift = self.forecast_offset * self.t_window_step if self.align_first_prediction else 0
+        self.t_start: NPDT64 = t_start - shift
+        self.t_end: NPDT64 = t_end
 
         assert self.t_start < self.t_end, "end datetime has to be in the past of start datetime"
         assert self.t_start > _DT_ZERO, "start datetime has to be >= 1850-01-01T00:00."
+
+    @classmethod
+    def from_stage_config(cls, mode_cfg) -> Self:
+        """The timeline a stage samples on, built from its resolved mode config.
+
+        The one place a configured `start_date` becomes a timeline: the sampler, the output
+        writer and the coupled driver all build it here, so a standalone run and a coupled one
+        given the same config cannot land on different windows. Defaults match
+        `FORECAST_DEFAULTS`.
+        """
+        forecast = mode_cfg.get("forecast") or {}
+        return cls(
+            mode_cfg.start_date,
+            mode_cfg.end_date,
+            mode_cfg.time_window_len,
+            mode_cfg.time_window_step,
+            align_first_prediction=bool(forecast.get("align_first_prediction", False)),
+            forecast_offset=int(forecast.get("offset", 0)),
+        )
+
+    @property
+    def first_prediction_start(self) -> NPDT64:
+        """Start of the first predicted window, `forecast_offset` windows after the first one.
+
+        Counted in windows, so it is the first *forecast* window only when a forecast step is
+        one window -- which the sampler requires whenever `align_first_prediction` is set.
+        """
+        return self.t_start + self.forecast_offset * self.t_window_step
 
     def __str__(self) -> str:
         # Helper to ensure readable timedelta formatting
         l_str = timedelta_to_str(self.t_window_len)
         s_str = timedelta_to_str(self.t_window_step)
+        aligned = (
+            f", aligned: first prediction at {self.first_prediction_start}"
+            if self.align_first_prediction
+            else ""
+        )
         return (
-            f"TimeWindowHandler: start={self.t_start}, end={self.t_end}, len={l_str}, step={s_str}"
+            f"TimeWindowHandler: start={self.t_start}, end={self.t_end}, len={l_str}, "
+            f"step={s_str}{aligned}"
         )
 
     def get_index_range(self) -> TimeIndexRange:
