@@ -19,6 +19,7 @@ from torch.distributed.fsdp import (
     fully_shard,
 )
 from torch.distributed.tensor import distribute_tensor
+from torch.utils._pytree import tree_map_only
 
 from weathergen.common.config import Config, get_path_model, merge_configs
 from weathergen.model.attention import (
@@ -43,29 +44,39 @@ logger = logging.getLogger(__name__)
 type TrainingMode = str
 
 
-def _unshard_before_forward(module: FSDPModule, args) -> None:
+def _unshard_before_forward(module: FSDPModule, args, kwargs):
     module.unshard()
+    # the forward-input cast of FSDP's pre-forward, skipped along with its unshard
+    mp_policy = module._get_fsdp_state()._mp_policy
+    if mp_policy.cast_forward_inputs and mp_policy.param_dtype is not None:
+        dtype = mp_policy.param_dtype
+        args, kwargs = tree_map_only(
+            torch.Tensor, lambda t: t.to(dtype) if t.is_floating_point() else t, (args, kwargs)
+        )
+    return args, kwargs
 
 
 def unshard_in_nested_recompute(model: torch.nn.Module) -> None:
     """
-    Make every sharded submodule of `model` unshard itself before its forward if FSDP did not.
+    Make every sharded submodule of `model` do FSDP's pre-forward work -- unshard, cast the
+    inputs to the mixed-precision dtype -- when FSDP itself skipped it.
 
-    FSDP2 skips its pre-forward unshard while a module is in its pre-backward state, which lasts
-    until the whole backward ends, assuming the pre-backward hook already unsharded it. A nested
+    FSDP2 skips its pre-forward while a module is in its pre-backward state, which lasts until
+    the whole backward ends, assuming the pre-backward hook already unsharded it. A nested
     checkpoint recompute breaks that assumption when a module runs more than once per iteration:
     the encoder's outer checkpoints (`EncoderModule.forward`) re-run their FSDP-sharded blocks
     during backward, and cross-attention forcing calls the encoder once per rollout step, so the
-    recompute for an earlier call finds the blocks resharded by a later call's post-backward and
-    multiplies sharded DTensor weights with plain tensors.
+    recompute for an earlier call finds the blocks resharded by a later call's post-backward
+    (mixed Tensor and DTensor) and its inputs not cast (recomputed tensors in float32 where the
+    forward saved bfloat16).
 
     FSDP's own hook runs first (it is prepended), so everywhere else this is a no-op: `unshard`
-    returns early on an unsharded or pre-backward parameter group. The call's own post-backward
-    reshards afterwards.
+    returns early on an unsharded or pre-backward parameter group, and the inputs are already
+    cast. The call's own post-backward reshards afterwards.
     """
     for module in model.modules():
         if isinstance(module, FSDPModule) and module is not model:
-            module.register_forward_pre_hook(_unshard_before_forward)
+            module.register_forward_pre_hook(_unshard_before_forward, with_kwargs=True)
 
 
 def init_model_and_shard(
