@@ -20,6 +20,7 @@ from weathergen.common.config import Config
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.averaging import AveragingReader
 from weathergen.datasets.batch import ModelBatch
+from weathergen.datasets.coupling_reader import forcing_lag
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
@@ -301,6 +302,12 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     dataset = DataReaderObs
                 case "anemoi":
                     dataset = DataReaderAnemoi
+                    if stream_info.get("is_dynamic_forcing", False):
+                        # forcing is read on a timeline shifted earlier by its lag, so the
+                        # subset must reach that far back (the lag `ForcingInput` resolves)
+                        kwargs["data_lookback"] = forcing_lag(
+                            stream_info, self.time_window_handler.t_window_step, self.output_offset
+                        )
                 case "fesom":
                     dataset = DataReaderFesom
                 case type_name:

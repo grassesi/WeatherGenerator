@@ -39,6 +39,7 @@ class DataReaderAnemoi(DataReaderTimestep):
         filename: Path,
         stream_info: dict,
         stage: Stage,
+        data_lookback: np.timedelta64 | None = None,
     ) -> None:
         """
         Construct data reader for anemoi dataset
@@ -49,6 +50,11 @@ class DataReaderAnemoi(DataReaderTimestep):
             filename (and path) of dataset
         stream_info :
             information about stream
+        data_lookback :
+            how far before `tw_handler.t_start` data must also be readable: a dynamic forcing
+            stream is read on a timeline shifted earlier by its forcing lag, so without it the
+            forcing of the first windows of every stage would fall outside the subset and come
+            back empty (and be spoofed). The windows themselves are unchanged.
 
         Returns
         -------
@@ -75,8 +81,12 @@ class DataReaderAnemoi(DataReaderTimestep):
                 f"subsampling_rate specified for anemoi dataset for stream {name}. "
                 + "Use frequency instead."
             )
+        subset_start = tw_handler.t_start
+        if data_lookback is not None:
+            # not before the data: a lookback past the dataset start still reads nothing there
+            subset_start = max(tw_handler.t_start - data_lookback, ds0.dates[0])
         ds: Dataset = anemoi_datasets.open_dataset(
-            ds0, **kwargs, start=tw_handler.t_start, end=tw_handler.t_end
+            ds0, **kwargs, start=subset_start, end=tw_handler.t_end
         )
 
         period = np.timedelta64(ds.frequency)

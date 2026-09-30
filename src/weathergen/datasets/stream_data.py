@@ -464,6 +464,10 @@ class StreamData:
         return any(self.source_is_spoof) or self.target_is_spoof[step]
 
 
+# tokens of a spoof, one per eighth of the nested cell index; see `spoof`
+SPOOF_TOKENS = 8
+
+
 def spoof(healpix_level: int, datetime, geoinfo_size, num_channels) -> IOReaderData:
     """
     Spoof an instance from data_reader_base.ReaderData instance.
@@ -477,9 +481,15 @@ def spoof(healpix_level: int, datetime, geoinfo_size, num_channels) -> IOReaderD
         np.arange(0, num_healpix_cells), 2**healpix_level, dx=dx, dy=dy, order="nested"
     )
 
-    coords = np.stack([lats.deg, lons.deg], axis=-1, dtype=np.float32)
-    # spoof two tokens to avoid unnecessary computational load
-    coords = coords[np.random.choice(coords.shape[0], size=2, replace=False)]
+    # healpy's longitudes are [0, 360); the tokenizer's cell of (lat, lon) is healpy's cell of
+    # lon + 180, so the centre of cell i is at healpy longitude - 180 in the data's coordinates
+    coords = np.stack([lats.deg, lons.deg - 180.0], axis=-1, dtype=np.float32)
+    # A few fixed tokens, to avoid unnecessary computational load: one at the start of every
+    # eighth of the nested cell index. The encoder assimilates in chunks of half (level <= 5) or
+    # an eighth (level > 5) of the cells and skips empty chunks; under FSDP every chunk is a
+    # collective, so a spoof must fill each chunk -- at any model level, as nested indices keep
+    # their fraction of the range -- or the rank holding it falls out of step with the others.
+    coords = coords[(np.arange(SPOOF_TOKENS) * num_healpix_cells) // SPOOF_TOKENS]
 
     geoinfos = np.zeros((coords.shape[0], geoinfo_size), dtype=np.float32)
     data = np.zeros((coords.shape[0], num_channels), dtype=np.float32)
