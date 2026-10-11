@@ -8,11 +8,12 @@
 # nor does it submit to any jurisdiction.
 
 """
-Scheduled per-channel offsets on top of an arbitrary data reader.
+Scheduled per-channel offsets and scalings on top of an arbitrary data reader.
 
 Used for perturbation experiments: "what does the model do if SST is 2 K warmer from day 4 of
-the rollout onward". The offset is declared per channel in the stream config and applied by a
-wrapper around the stream's real reader, so nothing downstream needs to know about it.
+the rollout onward", or "if the wind is twice as strong". The perturbation is declared per channel
+in the stream config and applied by a wrapper around the stream's real reader, so nothing
+downstream needs to know about it.
 """
 
 import dataclasses
@@ -41,10 +42,11 @@ ELEVATION_KEY = "elevation"
 
 @dataclasses.dataclass(frozen=True)
 class Elevation:
-    """A single channel's schedule: add `offset` to every value from `from_time` onward."""
+    """A single channel's schedule: `value * scale + offset` from `from_time` onward."""
 
     offset: float
     from_time: NPDT64
+    scale: float = 1.0
 
 
 def _as_datetime64(value) -> NPDT64:
@@ -67,10 +69,11 @@ def parse_elevations(
     """
     Resolve the stream config's `elevation` block for one set of channels.
 
-    The schedule is given per channel as `{offset: <float>, step: <int>}`, where `step` is the
-    forecast step from which the offset applies. It is resolved here, once, into the absolute
-    time `anchor_time + step * forecast_time_step`; `from_date` may be given instead to state
-    that time directly.
+    The schedule is given per channel as `{offset: <float>, scale: <float>, step: <int>}`, where
+    at least one of `offset` and `scale` is set and `step` is the forecast step from which the
+    perturbation applies. It is resolved here, once, into the absolute time
+    `anchor_time + step * forecast_time_step`; `from_date` may be given instead to state that
+    time directly.
 
     Parameters
     ----------
@@ -100,8 +103,10 @@ def parse_elevations(
         if entry is None:
             continue
 
-        if "offset" not in entry:
-            raise ValueError(f"{ELEVATION_KEY} entry for channel '{channel}' has no 'offset'.")
+        if "offset" not in entry and "scale" not in entry:
+            raise ValueError(
+                f"{ELEVATION_KEY} entry for channel '{channel}' has neither 'offset' nor 'scale'."
+            )
         if "step" in entry and "from_date" in entry:
             raise ValueError(
                 f"{ELEVATION_KEY} entry for channel '{channel}' sets both 'step' and 'from_date'; "
@@ -113,18 +118,23 @@ def parse_elevations(
         else:
             from_time = anchor_time + int(entry.get("step", 0)) * forecast_time_step
 
-        schedule[idx] = Elevation(offset=float(entry["offset"]), from_time=from_time)
+        schedule[idx] = Elevation(
+            offset=float(entry.get("offset", 0.0)),
+            from_time=from_time,
+            scale=float(entry.get("scale", 1.0)),
+        )
 
     return schedule
 
 
 class ElevatingReader(DataReaderBase, WrappedDataReader):
     """
-    Wraps a data reader and adds a configured constant to selected channels.
+    Wraps a data reader and scales and/or offsets selected channels by configured constants.
 
-    The offset is applied in the reader's own physical units, i.e. before the normalization
+    Both are applied in the reader's own physical units, i.e. before the normalization
     that happens further down in collect_datasources and ForcingInput._collect_forcing_data,
-    so a configured 2.0 on a temperature channel really is 2 K.
+    so a configured offset of 2.0 on a temperature channel really is 2 K and a scale of 2.0
+    doubles the physical value. The scale is applied first: `value * scale + offset`.
 
     The schedule is resolved against absolute time, not per-sample lead time. For an inference
     rollout, which has a single initial condition at the run's start_date, that is exactly
@@ -204,7 +214,7 @@ class ElevatingReader(DataReaderBase, WrappedDataReader):
             for idx, elevation in schedule.items():
                 _logger.info(
                     f"{self.stream_info.get('name')}: elevating {side} channel index {idx} by "
-                    f"{elevation.offset} from {elevation.from_time}."
+                    f"{elevation.offset} (scale {elevation.scale}) from {elevation.from_time}."
                 )
 
     @typing.override
@@ -258,14 +268,14 @@ class ElevatingReader(DataReaderBase, WrappedDataReader):
         elevations: dict[int, Elevation],
         idx: TIndex,
     ) -> ReaderData:
-        """Add each due channel's offset to the data read for time window `idx`."""
+        """Scale and offset each due channel of the data read for time window `idx`."""
 
         if not elevations or rdata.is_empty():
             return rdata
 
         window_start = self.time_window_handler.window(idx).start
         active = [
-            (pos, elevations[ch].offset)
+            (pos, elevations[ch].scale, elevations[ch].offset)
             for pos, ch in enumerate(channels_idx)
             if ch in elevations and window_start >= elevations[ch].from_time
         ]
@@ -273,12 +283,15 @@ class ElevatingReader(DataReaderBase, WrappedDataReader):
             return rdata
 
         # Copy rather than write in place: a reader is free to hand back a view into a buffer it
-        # keeps, and an in-place addition would corrupt it and compound over reads.
-        positions = np.fromiter((pos for pos, _ in active), dtype=np.intp, count=len(active))
+        # keeps, and an in-place change would corrupt it and compound over reads.
+        positions = np.fromiter((pos for pos, _, _ in active), dtype=np.intp, count=len(active))
+        scales = np.fromiter(
+            (scale for _, scale, _ in active), dtype=rdata.data.dtype, count=len(active)
+        )
         offsets = np.fromiter(
-            (offset for _, offset in active), dtype=rdata.data.dtype, count=len(active)
+            (offset for _, _, offset in active), dtype=rdata.data.dtype, count=len(active)
         )
         data = rdata.data.copy()
-        data[:, positions] += offsets
+        data[:, positions] = data[:, positions] * scales + offsets
 
         return dataclasses.replace(rdata, data=data)

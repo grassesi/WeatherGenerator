@@ -150,6 +150,27 @@ def test_offset_can_be_negative():
     assert reader.get_source(np.int64(0)).data[0, 1] == pytest.approx(98.5)
 
 
+def test_scale_multiplies_in_physical_units():
+    reader = make_reader({"2t": {"scale": 2.0, "step": 4}, "msl": {"scale": 0.5, "offset": 1.0}})
+    onset = window_idx_of_step(4)
+
+    early = reader.get_source(np.int64(onset - 1)).data
+    assert early[0, 1] == pytest.approx(100.0)
+    # the scale is applied before the offset: 200 * 0.5 + 1
+    assert early[0, 2] == pytest.approx(101.0)
+
+    late = reader.get_source(np.int64(onset)).data
+    assert late[0, 0] == pytest.approx(0.0)
+    assert late[0, 1] == pytest.approx(200.0)
+    # a second read is scaled once, not compounded
+    assert reader.get_source(np.int64(onset)).data[0, 1] == pytest.approx(200.0)
+
+
+def test_entry_without_offset_or_scale_is_refused():
+    with pytest.raises(ValueError, match="neither 'offset' nor 'scale'"):
+        make_reader({"sst": {"step": 0}})
+
+
 def test_other_channels_are_untouched():
     reader = make_reader({"sst": {"offset": 2.0, "step": 0}})
     data = reader.get_source(np.int64(0)).data
